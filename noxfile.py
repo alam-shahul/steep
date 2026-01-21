@@ -18,8 +18,8 @@ def flake8(session):
         "flake8-use-fstring",
         "pep8-naming",
     )
-    session.run("flake8", "steep/", "scripts/")
-    # session.run("flake8", "aeromatik/", "train.py")
+    session.run("flake8", "steep/")
+    # session.run("flake8", "steep/", "scripts/", "train.py")
 
 
 @nox.session(reuse_venv=True)
