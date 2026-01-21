@@ -1,4 +1,4 @@
 notebooks/wandb
 *.h5ad
-steep/__pycache__/*
+*/__pycache__/*
 .env

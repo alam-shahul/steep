@@ -1,25 +1,28 @@
-from typing import Union, Optional
-
-import torch
-from torch_geometric.data import Data
-from torch_geometric.utils import to_networkx, scatter
+from typing import Optional, Union
 
 import networkx as nx
+import torch
+from torch_geometric.data import Data
+from torch_geometric.utils import scatter, to_networkx
+
 
 def draw_graph(data: Data, with_labels: bool = True):
     """Draw a graph using NetworkX heuristic-based algorithm.
 
     Args:
         data: The graph to be drawn.
+
     """
     graph = to_networkx(data)
     nx.draw(graph, with_labels=with_labels)
 
-def laplacian(data: Data,
-              edge_weight: Optional[torch.Tensor] = None,
-              dtype: Optional[torch.dtype] = None,
-              normalization: Optional[str] = None
-     ):
+
+def laplacian(
+    data: Data,
+    edge_weight: Optional[torch.Tensor] = None,
+    dtype: Optional[torch.dtype] = None,
+    normalization: Optional[str] = None,
+):
     """Compute the graph Laplacian for simple graphs.
 
     TODO: test for weighted graphs.
@@ -33,8 +36,11 @@ def laplacian(data: Data,
 
     filtered_data = remove_self_loops(data)
     if edge_weight is None:
-        edge_weight = torch.ones(data.edge_index.size(dim=1), dtype=dtype,
-                                 device=edge_index.device)
+        edge_weight = torch.ones(
+            data.edge_index.size(dim=1),
+            dtype=dtype,
+            device=edge_index.device,
+        )
 
     num_nodes, _ = data.x.size()
     rows, cols = edge_index
@@ -45,6 +51,7 @@ def laplacian(data: Data,
     laplacian_edge_weight = torch.cat([-edge_weight, degree], dim=0)
 
     return laplacian_data, laplacian_edge_weight
+
 
 def remove_self_loops(data: Data):
     """Remove self-edges from graph.
@@ -62,7 +69,7 @@ def remove_self_loops(data: Data):
     except AttributeError:
         edge_attr = None
 
-    mask = (edge_index[0] != edge_index[1])
+    mask = edge_index[0] != edge_index[1]
 
     filtered_data = data.clone()
     filtered_data.edge_index = edge_index[:, mask]
@@ -71,8 +78,12 @@ def remove_self_loops(data: Data):
 
     return filtered_data
 
-def add_self_loops(data: Data, fill_value: Optional[Union[torch.Tensor, float]] = None,
-                  dtype: Optional[torch.dtype] = None):
+
+def add_self_loops(
+    data: Data,
+    fill_value: Optional[Union[torch.Tensor, float]] = None,
+    dtype: Optional[torch.dtype] = None,
+):
     """Add self-edges to graph. Assumes that no self-edges exist.
 
     Args:

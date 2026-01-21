@@ -1,5 +1,6 @@
 import importlib
 
+
 def get_name(target: str):
     module, obj = target.rsplit(".", 1)
     name = getattr(importlib.import_module(module, package=None), obj)
