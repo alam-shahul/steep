@@ -1,12 +1,10 @@
-import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
-import torch.nn as nn
 
 cudnn.deterministic = True
 cudnn.benchmark = True
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
 
 

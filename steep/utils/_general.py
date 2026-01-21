@@ -1,4 +1,8 @@
 import importlib
+from pprint import pformat
+from typing import Any
+
+from omegaconf import DictConfig
 
 
 def get_name(target: str):
@@ -10,7 +14,7 @@ def get_name(target: str):
 
 def instantiate_from_config(
     config: DictConfig,
-    *args: Tuple[Any],
+    *args: tuple[Any],
     _target_key: str = "type",
     _constructor_key: str = "constructor",
     _params_key: str = "args",
