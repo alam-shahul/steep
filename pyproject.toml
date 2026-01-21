@@ -1,0 +1,94 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "steep"
+dynamic = ["version"]
+
+authors = [
+  { name="Shahul Alam", email="alam.shahul@gmail.com" },
+]
+
+dependencies = [  # TODO: check which are necessary
+    "packaging",
+    "hydra-core",
+    "omegaconf",
+    "wandb",
+    "tqdm",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "torchmetrics",
+    "torch>=2.0",
+    "torch_geometric",
+    "anndata",
+    "awkward",
+    "scanpy",
+    "squidpy",
+    "mygene",
+]
+description = "Steep: Compression Strategies for Efficient Representation of Spatial Transcriptomes"
+readme = "README.md"
+license = { file="LICENSE" }
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "steep/*.py",
+]
+
+[tool.hatch.build.targets.wheel]
+include = [
+  "steep/*.py",
+]
+
+[tool.hatch.version]
+path = "steep/__about__.py"
+
+[tool.flake8]
+max-line-length = 120
+count = true
+extend-ignore = [
+    "E203",  # conflicting with black style slicing
+    "D107",  # only need docstring at class level, no need at __init__
+]
+exclude = [
+    ".nox",
+    ".git",
+    "__pycache__",
+    "build",
+    "dist",
+    "*.pyc",
+    "*.egg-info",
+    ".eggs",
+]
+
+[tool.black]
+line-length = 120
+preview = true
+
+[tool.isort]
+profile = "black"
+line_length = 120
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests for entire Steep pipeline"
+]
+
+# Dev requirements
+[dependency-groups]
+dev = [
+    "ipdb",
+    "ipython",
+    "nox",
+    "pre-commit",
+    "pytest",
+    "python-dotenv"
+]
