@@ -1,0 +1,4 @@
+notebooks/wandb
+*.h5ad
+steep/__pycache__/*
+.env

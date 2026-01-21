@@ -1,0 +1,2 @@
+class MoG:
+    pass
