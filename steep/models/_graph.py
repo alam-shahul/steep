@@ -1,11 +1,19 @@
+from typing import Optional, Tuple, Union
+
 import torch
 import torch.backends.cudnn as cudnn
-
-cudnn.deterministic = True
-cudnn.benchmark = True
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
+from torch.nn import Parameter
+from torch_geometric.nn.conv import MessagePassing
+
+# from torch_geometric.nn.dense.linear import Linear
+from torch_geometric.typing import Adj, OptPairTensor, OptTensor, Size, SparseTensor, torch_sparse
+from torch_geometric.utils import add_self_loops, remove_self_loops, softmax
+
+cudnn.deterministic = True
+cudnn.benchmark = True
 
 
 class STAGATE(nn.Module):
@@ -73,19 +81,6 @@ class STAGATE(nn.Module):
         h4 = self.conv4(h3, edge_index, attention=False)
 
         return h2, h4  # F.log_softmax(x, dim=-1)
-
-
-from typing import Optional, Tuple, Union
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch import Tensor
-from torch.nn import Parameter
-from torch_geometric.nn.conv import MessagePassing
-from torch_geometric.nn.dense.linear import Linear
-from torch_geometric.typing import Adj, NoneType, OptPairTensor, OptTensor, Size, SparseTensor, torch_sparse
-from torch_geometric.utils import add_self_loops, remove_self_loops, softmax
 
 
 class GATConv(MessagePassing):
@@ -219,20 +214,20 @@ class GATConv(MessagePassing):
                 :obj:`(edge_index, attention_weights)`, holding the computed
                 attention weights for each edge. (default: :obj:`None`)
         """
-        H, C = self.heads, self.out_channels
+        heads, channels = self.heads, self.out_channels
 
         # We first transform the input node features. If a tuple is passed, we
         # transform source and target node features via separate weights:
         if isinstance(x, Tensor):
             assert x.dim() == 2, "Static graphs not supported in 'GATConv'"
-            # x_src = x_dst = self.lin_src(x).view(-1, H, C)
-            x_src = x_dst = torch.mm(x, self.lin_src).view(-1, H, C)
+            # x_src = x_dst = self.lin_src(x).view(-1, heads, channels)
+            x_src = x_dst = torch.mm(x, self.lin_src).view(-1, heads, channels)
         else:  # Tuple of source and target node features:
             x_src, x_dst = x
             assert x_src.dim() == 2, "Static graphs not supported in 'GATConv'"
-            x_src = self.lin_src(x_src).view(-1, H, C)
+            x_src = self.lin_src(x_src).view(-1, heads, channels)
             if x_dst is not None:
-                x_dst = self.lin_dst(x_dst).view(-1, H, C)
+                x_dst = self.lin_dst(x_dst).view(-1, heads, channels)
 
         x = (x_src, x_dst)
 
@@ -240,7 +235,7 @@ class GATConv(MessagePassing):
             return x[0].mean(dim=1)
             # return x[0].view(-1, self.heads * self.out_channels)
 
-        if tied_attention == None:
+        if tied_attention is None:
             # Next, we compute node-level attention coefficients, both for source
             # and target nodes (if present):
             alpha_src = (x_src * self.att_src).sum(dim=-1)
@@ -307,9 +302,4 @@ class GATConv(MessagePassing):
         return x_j * alpha.unsqueeze(-1)
 
     def __repr__(self):
-        return "{}({}, {}, heads={})".format(
-            self.__class__.__name__,
-            self.in_channels,
-            self.out_channels,
-            self.heads,
-        )
+        return f"{self.__class__.__name__}({self.in_channels}, {self.out_channels}, heads={self.heads})"
