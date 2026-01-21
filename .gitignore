@@ -3,3 +3,4 @@ notebooks/wandb
 __pycache__/
 *.pyc
 .env
+*.swp
