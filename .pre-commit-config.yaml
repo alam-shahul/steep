@@ -50,4 +50,3 @@ repos:
       - id: mdformat
         name: Format markdown
         additional_dependencies: [mdformat-gfm]
-
