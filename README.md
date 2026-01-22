@@ -10,6 +10,8 @@ STeep is a set of tools for distilling spatially-resolved transcriptomics (SRT) 
 ## Dev environment setup
 
 ```bash
+git clone https://github.com/alam-shahul/steep.git
+cd steep
 pip install --group=dev -e .
 pre-commit install
 ```
@@ -25,24 +27,11 @@ remote branch, run `nox` to perform a final quality check. Note that `nox` is
 linting only and does not fix the issues for you. You need to address the issues manually
 based on the instructions provided.
 
-## Nox
+## Writing unittests
 
-Run code linting and unittests:
-
-```bash
-nox
-```
-
-Run code linting only:
-
-```bash
-nox -e lint
-```
-
-## Local tests
-
-We use [pytest](https://docs.pytest.org/en/stable/getting-started.html) to write local tests.
-New test suites can be added under `tests/test_{suite_name}.py`.
+We use [pytest](https://docs.pytest.org/en/stable/getting-started.html) to write unittests.
+Unittests should always be added for new functionality. New test suites can be added under
+`tests/test_{suite_name}.py`.
 
 Run a particular test suite with:
 
@@ -61,4 +50,26 @@ The contents of the file should be like so:
 
 ```bash
 HYDRA_USER=test
+```
+
+## Code style and Nox
+
+We adhere closely to the
+[Google Python styleguide](https://google.github.io/styleguide/pyguide.html) for guidance on
+standards of code style; please peruse the guide before contributing any code.
+
+Nox is a tool that automates testing in multiple Python environments. Nox can be used to run
+tests locally as well as remotely, e.g. on GitHub servers when committing code. Please invoke
+Nox manually as a final quality check to maintain code style.
+
+Run code linting and unittests:
+
+```bash
+nox
+```
+
+Run code linting only:
+
+```bash
+nox -e lint
 ```
