@@ -27,6 +27,21 @@ remote branch, run `nox` to perform a final quality check. Note that `nox` is
 linting only and does not fix the issues for you. You need to address the issues manually
 based on the instructions provided.
 
+## Adding a feature
+
+We use pull requests and squash commits for all new features. Use the following workflow when
+adding a new feature:
+
+```bash
+git checkout main # Make sure you're on the main branch
+git checkout -b {feature_name}
+{add code, add commits}
+git push --set-upstream origin {feature_name}
+```
+
+Next, in the GitHub pull request interface, please engage with others to perform code review of
+your proposed code.
+
 ## Writing unittests
 
 We use [pytest](https://docs.pytest.org/en/stable/getting-started.html) to write unittests.
