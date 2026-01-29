@@ -41,11 +41,13 @@ classifiers = [
 [tool.hatch.build.targets.sdist]
 include = [
   "steep/*.py",
+  "steep/**/*.py",
 ]
 
 [tool.hatch.build.targets.wheel]
 include = [
   "steep/*.py",
+  "steep/**/*.py",
 ]
 
 [tool.hatch.version]
