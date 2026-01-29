@@ -1,7 +1,10 @@
 from typing import Optional, Union
 
+import anndata as ad
 import networkx as nx
+import numpy as np
 import torch
+from scipy.sparse import issparse
 from torch_geometric.data import Data
 from torch_geometric.utils import scatter, to_networkx
 
@@ -110,3 +113,21 @@ def add_self_loops(
         augmented_data.edge_attr = torch.cat([edge_attr, self_attr], dim=1)
 
     return augmented_data
+
+
+def anndata_to_pyg(
+    adata: ad.AnnData,
+    adjacency_matrix_key="adjacency_matrix",
+):
+    """Convert spatial transcriptomics data from AnnData to PyG."""
+
+    adjacency_matrix = adata.obsp[adjacency_matrix_key]
+
+    edge_list = np.nonzero(adjacency_matrix)
+    edge_index = torch.LongTensor(np.transpose(edge_list))
+    x = adata.X
+    if issparse(x):
+        x = x.todense()
+    x = torch.FloatTensor(x)
+
+    return Data(edge_index=edge_index, x=x)
