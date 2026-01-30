@@ -124,7 +124,7 @@ def anndata_to_pyg(
     adjacency_matrix = adata.obsp[adjacency_matrix_key]
 
     edge_list = np.nonzero(adjacency_matrix)
-    edge_index = torch.LongTensor(np.transpose(edge_list))
+    edge_index = torch.LongTensor(np.array(edge_list))
     x = adata.X
     if issparse(x):
         x = x.todense()
