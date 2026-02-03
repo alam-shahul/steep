@@ -62,7 +62,9 @@ class STAGATE(nn.Module):
             bias=False,
         )
 
-    def forward(self, features, edge_index):
+    def forward(self, data):
+        features = data.x
+        edge_index = data.edge_index
 
         h1 = F.elu(self.conv1(features, edge_index))
         h2 = self.conv2(h1, edge_index, attention=False)
@@ -79,8 +81,13 @@ class STAGATE(nn.Module):
             ),
         )
         h4 = self.conv4(h3, edge_index, attention=False)
+        outputs = {
+            "embedding": h2,
+            "logits": h4,
+        }
 
-        return h2, h4  # F.log_softmax(x, dim=-1)
+        return outputs
+        # return h2, h4  # F.log_softmax(x, dim=-1)
 
 
 class GATConv(MessagePassing):

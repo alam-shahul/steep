@@ -11,7 +11,7 @@ from torch import nn
 from torch.nn import functional as F  # noqa: N812
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import random_split
-from torch_geometric.data import Dataset
+from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 from transformers import get_scheduler
@@ -42,26 +42,33 @@ class PyGTrainer:
         self.cfg = cfg
         self.model = model
 
+        # Training loop hyperparameters
         self.batchsize = batchsize
         self.epochs = epochs
         self.device = device
         self.model.to(self.device)
+        self._instantiate_loss()
 
+        # Dataset hyperparameters
         self.shuffle = shuffle
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
         self.test_ratio = 1 - train_ratio - val_ratio
 
+        # Random seeds
         self.random_seed = random_seed
         self.rng = torch.Generator().manual_seed(random_seed)
 
+        # Dataloader setup
         self.data = data
         self.step = 0
 
+        # Optimizer setup
         self.grad_norm_clip = grad_norm_clip
         self._initialize_optimizer()
         self._initialize_lr_scheduler()
 
+        # WandB setup
         self.run_wandb = run_wandb
         if run_wandb:
             self._initialize_wandb()
@@ -141,6 +148,10 @@ class PyGTrainer:
             num_warmup_steps=warmup_step,
             num_training_steps=total_steps,
         )
+
+    def _instantiate_loss(self):
+        loss_kwargs = {}  # Placeholder in case we need special loss function parameters/shapes
+        self.loss = instantiate_from_config(self.cfg.loss, **loss_kwargs)
 
     def save_checkpoint(self, epoch):
         """Save model checkpoint at the given epoch."""
@@ -272,10 +283,16 @@ class PyGTrainer:
         except FileExistsError:
             print(f"> Checkpoint directory already exists at {self.results_folder}")
 
-    def get_loss(self, batch):
-        """Run batch through model."""
-        _, output = self.model(batch.x, batch.edge_index)
-        loss = F.mse_loss(batch.x, output)
+    def get_loss(self, inputs: Data):
+        """Run batch through model.
+
+        Args:
+            inputs: a PyTorch Geometric dataset.
+
+        """
+        outputs = self.model(inputs)
+        loss = self.get_loss(inputs, outputs)
+
         return loss
 
     def iterate_dataloader(
