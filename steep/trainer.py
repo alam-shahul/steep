@@ -151,7 +151,7 @@ class PyGTrainer:
 
     def _instantiate_loss(self):
         loss_kwargs = {}  # Placeholder in case we need special loss function parameters/shapes
-        self.loss = instantiate_from_config(self.cfg.loss, **loss_kwargs)
+        self.loss_function = instantiate_from_config(self.cfg.loss, **loss_kwargs)
 
     def save_checkpoint(self, epoch):
         """Save model checkpoint at the given epoch."""
@@ -291,7 +291,7 @@ class PyGTrainer:
 
         """
         outputs = self.model(inputs)
-        loss = self.get_loss(inputs, outputs)
+        loss = self.loss_function(inputs, outputs)
 
         return loss
 
