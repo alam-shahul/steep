@@ -1,0 +1,4 @@
+type: steep.models.STAGATE
+
+args:
+  num_hidden: 128

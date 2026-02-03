@@ -1,0 +1,5 @@
+# global_vars.yaml
+data_path: /work/magroup/shared/tissueFM/processed_data
+ensembl_dir: ${data_path}
+cache_dir: /work/magroup/shared/steep/
+entity: Heimdall

@@ -1,0 +1,4 @@
+name: cosine
+
+args:
+  warmup_ratio: 0.1  # linear warmup steps = warmup_ratio * total steps
