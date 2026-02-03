@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - _self_  # NOTE: init self first
+  - global_vars  # TODO: move to this file (_self_)?
+  - /model: stagate
+  - /dataset: brain_pretrain
+  - /optimizer: adamw
+  - /scheduler: cosine
+  - /trainer: default
+
+run_name: run_name
+project: default
+float_dtype: float32

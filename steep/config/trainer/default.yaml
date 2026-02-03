@@ -1,0 +1,10 @@
+type: steep.trainer.PyGTrainer
+
+args:
+  train_ratio: 0.8
+  val_ratio: 0.1
+  epochs: 1
+  shuffle: true
+  batchsize: 2
+  device: cpu
+  run_wandb: false

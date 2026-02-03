@@ -42,12 +42,14 @@ classifiers = [
 include = [
   "steep/*.py",
   "steep/**/*.py",
+  "steep/config/**.yaml",
 ]
 
 [tool.hatch.build.targets.wheel]
 include = [
   "steep/*.py",
   "steep/**/*.py",
+  "steep/config/**.yaml",
 ]
 
 [tool.hatch.version]
