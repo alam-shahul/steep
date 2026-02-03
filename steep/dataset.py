@@ -2,7 +2,7 @@ from pathlib import Path
 
 import anndata as ad
 import scanpy as sc
-from torch_geometric.data import Data, Dataset
+from torch_geometric.data import Dataset
 
 from steep.utils import anndata_to_pyg
 
@@ -13,7 +13,7 @@ class SRTDataset(Dataset):
         self.data_directory = Path(data_directory)
         self.data_paths = list(self.data_directory.iterdir())
 
-    def len(self):
+    def len(self):  # noqa: A003
         return len(self.data_paths)
 
     def get(self, idx):

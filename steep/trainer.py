@@ -8,10 +8,10 @@ import torch
 import wandb
 from omegaconf import OmegaConf
 from torch import nn
-from torch.nn import functional as F
+from torch.nn import functional as F  # noqa: N812
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import random_split
-from torch_geometric.data import Data, Dataset
+from torch_geometric.data import Dataset
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 from transformers import get_scheduler
@@ -141,16 +141,6 @@ class PyGTrainer:
             num_warmup_steps=warmup_step,
             num_training_steps=total_steps,
         )
-
-    def fit(
-        self,
-        resume_from_checkpoint=True,
-        start_epoch=0,
-    ):
-        """Train the model with automatic checkpointing and resumption."""
-        # Try to resume from checkpoint if requested
-        if resume_from_checkpoint:
-            start_epoch = self.load_checkpoint()
 
     def save_checkpoint(self, epoch):
         """Save model checkpoint at the given epoch."""
@@ -308,7 +298,6 @@ class PyGTrainer:
                 batch = batch.to(self.device)
                 step += 1
 
-                is_logging = step % log_every == 0
                 lr = self.lr_scheduler.get_last_lr()[0]
 
                 loss = self.get_loss(batch)
@@ -400,8 +389,8 @@ class PyGTrainer:
 
         for epoch in range(start_epoch, self.epochs):
             # Validation and test evaluation
-            valid_log = self.validation_epoch(self.dataloaders["val"], "val")
-            test_log = self.validation_epoch(self.dataloaders["test"], "test")
+            self.validation_epoch(self.dataloaders["val"], "val")
+            self.validation_epoch(self.dataloaders["test"], "test")
 
             # self.save_checkpoint(epoch)
 
