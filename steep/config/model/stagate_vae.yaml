@@ -1,4 +1,4 @@
-type: steep.models.STAGATE
+type: steep.models.STAGATEVAE
 
 args:
   num_hidden: 512

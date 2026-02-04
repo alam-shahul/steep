@@ -11,10 +11,8 @@ class VAELoss(nn.Module):
 
     def forward(
         self,
-        mean: Tensor,
-        logvar: Tensor,
-        outputs: Tensor,
         inputs: Data,
+        outputs: Tensor,
     ):
         mean = outputs["mean"]
         logvar = outputs["logvar"]
@@ -29,7 +27,6 @@ class GaussianKLDivergence(nn.Module):
     def __init__(self, reduction: str = "mean"):
         super().__init__()
         self.reduction = reduction
-        self.eps = eps
 
     def forward(self, mean: Tensor, logvar: Tensor):
         kl = -0.5 * (1 + logvar - mean.pow(2) - logvar.exp())

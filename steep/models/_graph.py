@@ -5,7 +5,6 @@ import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
-from torch.nn import Parameter
 from torch_geometric.nn.conv import MessagePassing
 
 # from torch_geometric.nn.dense.linear import Linear
@@ -24,10 +23,17 @@ class STAGATE(nn.Module):
         out_dim: int,
     ):
         super().__init__()
+        self.in_dim = in_dim
+        self.num_hidden = num_hidden
+        self.out_dim = out_dim
 
+        self._init_encoder()
+        self._init_decoder()
+
+    def _init_encoder(self):
         self.conv1 = GATConv(
-            in_dim,
-            num_hidden,
+            self.in_dim,
+            self.num_hidden,
             heads=1,
             concat=False,
             dropout=0,
@@ -35,17 +41,19 @@ class STAGATE(nn.Module):
             bias=False,
         )
         self.conv2 = GATConv(
-            num_hidden,
-            out_dim,
+            self.num_hidden,
+            self.out_dim,
             heads=1,
             concat=False,
             dropout=0,
             add_self_loops=False,
             bias=False,
         )
+
+    def _init_decoder(self):
         self.conv3 = GATConv(
-            out_dim,
-            num_hidden,
+            self.out_dim,
+            self.num_hidden,
             heads=1,
             concat=False,
             dropout=0,
@@ -53,8 +61,8 @@ class STAGATE(nn.Module):
             bias=False,
         )
         self.conv4 = GATConv(
-            num_hidden,
-            in_dim,
+            self.num_hidden,
+            self.in_dim,
             heads=1,
             concat=False,
             dropout=0,
@@ -62,12 +70,13 @@ class STAGATE(nn.Module):
             bias=False,
         )
 
-    def forward(self, data):
-        features = data.x
-        edge_index = data.edge_index
-
+    def encode(self, features, edge_index):
         h1 = F.elu(self.conv1(features, edge_index))
         h2 = self.conv2(h1, edge_index, attention=False)
+
+        return h2
+
+    def decode(self, h2, edge_index):
         self.conv3.lin_src.data = self.conv2.lin_src.transpose(0, 1)
         self.conv3.lin_dst.data = self.conv2.lin_dst.transpose(0, 1)
         self.conv4.lin_src.data = self.conv1.lin_src.transpose(0, 1)
@@ -81,7 +90,77 @@ class STAGATE(nn.Module):
             ),
         )
         h4 = self.conv4(h3, edge_index, attention=False)
+
+        return h4
+
+    def forward(self, data):
+        features = data.x
+        edge_index = data.edge_index
+        h2 = self.encode(features, edge_index)
+        h4 = self.decode(h2, edge_index)
         outputs = {
+            "embedding": h2,
+            "logits": h4,
+        }
+
+        return outputs
+        # return h2, h4  # F.log_softmax(x, dim=-1)
+
+
+class STAGATEVAE(STAGATE):
+    def _init_encoder(self):
+        self.conv1 = GATConv(
+            self.in_dim,
+            self.num_hidden,
+            heads=1,
+            concat=False,
+            dropout=0,
+            add_self_loops=False,
+            bias=False,
+        )
+        self.conv2 = GATConv(
+            self.num_hidden,
+            self.out_dim,
+            heads=1,
+            concat=False,
+            dropout=0,
+            add_self_loops=False,
+            bias=False,
+        )
+
+        self.conv2_5 = GATConv(
+            self.num_hidden,
+            self.out_dim,
+            heads=1,
+            concat=False,
+            dropout=0,
+            add_self_loops=False,
+            bias=False,
+        )
+
+    def encode(self, features, edge_index):
+        h1 = F.elu(self.conv1(features, edge_index))
+        mean = self.conv2(h1, edge_index, attention=False)
+        logvar = self.conv2_5(h1, edge_index, attention=False)
+
+        return mean, logvar
+
+    def reparametrize(self, mean: Tensor, logvar: Tensor):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+
+        return mean + eps * std
+
+    def forward(self, data):
+        features = data.x
+        edge_index = data.edge_index
+        mean, logvar = self.encode(features, edge_index)
+        h2 = self.reparametrize(mean, logvar)
+
+        h4 = self.decode(h2, edge_index)
+        outputs = {
+            "mean": mean,
+            "logvar": logvar,
             "embedding": h2,
             "logits": h4,
         }
@@ -177,8 +256,8 @@ class GATConv(MessagePassing):
         self.lin_dst = self.lin_src
 
         # The learnable parameters to compute attention coefficients:
-        self.att_src = Parameter(torch.Tensor(1, heads, out_channels))
-        self.att_dst = Parameter(torch.Tensor(1, heads, out_channels))
+        self.att_src = nn.Parameter(torch.Tensor(1, heads, out_channels))
+        self.att_dst = nn.Parameter(torch.Tensor(1, heads, out_channels))
         nn.init.xavier_normal_(self.att_src.data, gain=1.414)
         nn.init.xavier_normal_(self.att_dst.data, gain=1.414)
 
