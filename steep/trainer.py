@@ -9,7 +9,6 @@ import torch
 import wandb
 from omegaconf import OmegaConf
 from torch import nn
-from torch.nn import functional as F  # noqa: N812
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import random_split
 from torch_geometric.data import Data, Dataset
