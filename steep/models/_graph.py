@@ -20,12 +20,12 @@ class STAGATE(nn.Module):
         self,
         in_dim: int,
         num_hidden: int,
-        out_dim: int,
+        d_model: int,
     ):
         super().__init__()
         self.in_dim = in_dim
         self.num_hidden = num_hidden
-        self.out_dim = out_dim
+        self.d_model = d_model
 
         self._init_encoder()
         self._init_decoder()
@@ -42,7 +42,7 @@ class STAGATE(nn.Module):
         )
         self.conv2 = GATConv(
             self.num_hidden,
-            self.out_dim,
+            self.d_model,
             heads=1,
             concat=False,
             dropout=0,
@@ -52,7 +52,7 @@ class STAGATE(nn.Module):
 
     def _init_decoder(self):
         self.conv3 = GATConv(
-            self.out_dim,
+            self.d_model,
             self.num_hidden,
             heads=1,
             concat=False,
@@ -120,7 +120,7 @@ class STAGATEVAE(STAGATE):
         )
         self.conv2 = GATConv(
             self.num_hidden,
-            self.out_dim,
+            self.d_model,
             heads=1,
             concat=False,
             dropout=0,
@@ -130,7 +130,7 @@ class STAGATEVAE(STAGATE):
 
         self.conv2_5 = GATConv(
             self.num_hidden,
-            self.out_dim,
+            self.d_model,
             heads=1,
             concat=False,
             dropout=0,

@@ -2,4 +2,4 @@ type: steep.models.STAGATE
 
 args:
   num_hidden: 512
-  out_dim: 30
+  d_model: 30
