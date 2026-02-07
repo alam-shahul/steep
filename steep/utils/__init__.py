@@ -1,6 +1,6 @@
 from steep.utils._general import get_fully_qualified_cache_paths, get_name, instantiate_from_config
 from steep.utils._graph import compute_spatial_neighbors, construct_spatial_graph
-from steep.utils._pyg import add_self_loops, anndata_to_pyg, draw_graph, laplacian, remove_self_loops
+from steep.utils._pyg import add_self_loops, anndata_to_pyg, draw_graph, laplacian, pyg_to_anndata, remove_self_loops
 
 __all__ = [
     draw_graph.__name__,
@@ -13,4 +13,5 @@ __all__ = [
     compute_spatial_neighbors.__name__,
     construct_spatial_graph.__name__,
     anndata_to_pyg.__name__,
+    pyg_to_anndata.__name__,
 ]

@@ -4,7 +4,7 @@ import anndata as ad
 import networkx as nx
 import numpy as np
 import torch
-from scipy.sparse import issparse
+from scipy.sparse import coo_array, issparse
 from torch_geometric.data import Data
 from torch_geometric.utils import scatter, to_networkx
 
@@ -117,17 +117,53 @@ def add_self_loops(
 
 def anndata_to_pyg(
     adata: ad.AnnData,
-    adjacency_matrix_key="adjacency_matrix",
+    spatial_key: str = "spatial",
+    adjacency_matrix_key: str = "adjacency_matrix",
 ):
     """Convert spatial transcriptomics data from AnnData to PyG."""
 
     adjacency_matrix = adata.obsp[adjacency_matrix_key]
-
     edge_list = np.nonzero(adjacency_matrix)
     edge_index = torch.LongTensor(np.array(edge_list))
+
+    coordinates = adata.obsm[spatial_key]
+    coordinates = torch.FloatTensor(coordinates)
+
     x = adata.X
     if issparse(x):
         x = x.todense()
     x = torch.FloatTensor(x)
 
-    return Data(edge_index=edge_index, x=x)
+    return Data(edge_index=edge_index, x=x, pos=coordinates)
+
+
+def pyg_to_anndata(
+    data: Data,
+    spatial_key: str = "spatial",
+    adjacency_matrix_key: str = "adjacency_matrix",
+) -> ad.AnnData:
+    """Convert a PyG Data object back into AnnData."""
+
+    # ---- X (expression) ----
+    x = data.x.detach().cpu().numpy()
+
+    adata = ad.AnnData(X=x)
+
+    coordinates = data.pos.detach().cpu().numpy()
+    adata.obsm[spatial_key] = coordinates
+
+    edge_index = data.edge_index.detach().cpu().numpy()
+
+    num_cells = adata.n_obs
+    _, num_adjacencies = edge_index.shape
+
+    values = np.ones(num_adjacencies, dtype=np.float32)
+
+    adjacency_matrix = coo_array(
+        (values, edge_index),
+        shape=(num_cells, num_cells),
+    ).tocsr()
+
+    adata.obsp[adjacency_matrix_key] = adjacency_matrix
+
+    return adata

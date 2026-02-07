@@ -231,7 +231,7 @@ class PyGTrainer:
         if "pretrained_ckpt_path" in config:
             load_path = Path(config.pretrained_ckpt_path)
             if not load_path.exists():
-                self.print_r0(
+                print(
                     f"> Checkpoint file {load_path} does not exist. Check the value of "
                     f"`{config.pretrained_ckpt_path=}` for correctness.",
                 )
