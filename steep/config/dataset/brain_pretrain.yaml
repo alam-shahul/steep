@@ -1,5 +1,5 @@
 name: brain_pretrain
-type: enfuzers.dataset.SRTDataset
+type: steep.dataset.SRTDataset
 
 args:
   data_directory: ${data_path}/combined/pretrain

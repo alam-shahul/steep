@@ -1,4 +1,5 @@
 import random
+from collections import defaultdict
 from pathlib import Path
 from pprint import pformat
 
@@ -8,10 +9,9 @@ import torch
 import wandb
 from omegaconf import OmegaConf
 from torch import nn
-from torch.nn import functional as F  # noqa: N812
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import random_split
-from torch_geometric.data import Dataset
+from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 from transformers import get_scheduler
@@ -42,26 +42,33 @@ class PyGTrainer:
         self.cfg = cfg
         self.model = model
 
+        # Training loop hyperparameters
         self.batchsize = batchsize
         self.epochs = epochs
         self.device = device
         self.model.to(self.device)
+        self._instantiate_loss()
 
+        # Dataset hyperparameters
         self.shuffle = shuffle
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
         self.test_ratio = 1 - train_ratio - val_ratio
 
+        # Random seeds
         self.random_seed = random_seed
         self.rng = torch.Generator().manual_seed(random_seed)
 
+        # Dataloader setup
         self.data = data
         self.step = 0
 
+        # Optimizer setup
         self.grad_norm_clip = grad_norm_clip
         self._initialize_optimizer()
         self._initialize_lr_scheduler()
 
+        # WandB setup
         self.run_wandb = run_wandb
         if run_wandb:
             self._initialize_wandb()
@@ -95,6 +102,7 @@ class PyGTrainer:
             "train": train_dataset,
             "test": test_dataset,
             "val": val_dataset,
+            "full": self.data,
         }
         self.dataloaders = {}
         for split, split_dataset in self.datasets.items():
@@ -141,6 +149,10 @@ class PyGTrainer:
             num_warmup_steps=warmup_step,
             num_training_steps=total_steps,
         )
+
+    def _instantiate_loss(self):
+        loss_kwargs = {}  # Placeholder in case we need special loss function parameters/shapes
+        self.loss_function = instantiate_from_config(self.cfg.loss, **loss_kwargs)
 
     def save_checkpoint(self, epoch):
         """Save model checkpoint at the given epoch."""
@@ -213,6 +225,42 @@ class PyGTrainer:
 
         return epoch
 
+    def get_pretrained_load_path(self):
+        config = self.cfg
+        load_path = None
+        if "pretrained_ckpt_path" in config:
+            load_path = Path(config.pretrained_ckpt_path)
+            if not load_path.exists():
+                print(
+                    f"> Checkpoint file {load_path} does not exist. Check the value of "
+                    f"`{config.pretrained_ckpt_path=}` for correctness.",
+                )
+
+        return load_path
+
+    def load_pretrained(self):
+        load_path = self.get_pretrained_load_path()
+        if load_path is None:
+            return
+
+        print(f"> Loading pretrained model state from {load_path}")
+
+        data = torch.load(str(load_path), map_location=self.device, weights_only=False)
+        self.model.load_state_dict(data, strict=False)
+
+        # pretrained_state_dict = data["model"]
+
+        # filtered_pretrained_params = OrderedDict(
+        #     filter(lambda param_tuple: "decoder" not in param_tuple[0], pretrained_state_dict.items()),
+        # )  # we drop the pretrained head and load all other params
+
+        # Unwrap model and restore parameters
+        # self.model.load_state_dict(filtered_pretrained_params, strict=False)
+
+        self.load_trainer_state(data)
+
+        print(f">Finished loading pretrained params loaded from {load_path}")
+
     def load_checkpoint(self):
         """Load the most recent checkpoint."""
 
@@ -272,17 +320,24 @@ class PyGTrainer:
         except FileExistsError:
             print(f"> Checkpoint directory already exists at {self.results_folder}")
 
-    def get_loss(self, batch):
-        """Run batch through model."""
-        _, output = self.model(batch.x, batch.edge_index)
-        loss = F.mse_loss(batch.x, output)
-        return loss
+    def get_outputs_and_loss(self, inputs: Data):
+        """Run batch through model.
+
+        Args:
+            inputs: a PyTorch Geometric dataset.
+
+        """
+        outputs = self.model(inputs)
+        loss = self.loss_function(inputs, outputs)
+
+        return outputs, loss
 
     def iterate_dataloader(
         self,
         dataloader,
         loss=None,
         epoch=None,
+        keys_to_keep: list[str] | None = None,
         log_every: int = 1,
     ):
         """Iterate through `DataLoader` (fo training or validation)."""
@@ -293,6 +348,10 @@ class PyGTrainer:
         else:
             step = 0
 
+        if keys_to_keep is None:
+            keys_to_keep = []
+
+        outputs = defaultdict(list)
         with tqdm(dataloader) as pbar:
             for batch in pbar:
                 batch = batch.to(self.device)
@@ -300,7 +359,11 @@ class PyGTrainer:
 
                 lr = self.lr_scheduler.get_last_lr()[0]
 
-                loss = self.get_loss(batch)
+                batch_outputs, loss = self.get_outputs_and_loss(batch)
+                for key in keys_to_keep:
+                    outputs[key].extend(batch_outputs[key].detach().cpu().numpy())
+                del batch_outputs
+
                 # batch = batch.to("cpu")
                 del batch
 
@@ -343,7 +406,7 @@ class PyGTrainer:
                         f"Batch loss: {loss:.4f} ",
                     )
 
-        return loss
+        return outputs, loss
 
     def validation_epoch(self, dataloader, dataloader_type):
         """Validate model (without updating model weights)."""
@@ -353,7 +416,7 @@ class PyGTrainer:
             raise ValueError("`DataLoader` length cannot be zero. Check custom sampler implementation.")
 
         with torch.no_grad():
-            loss = self.iterate_dataloader(dataloader)
+            _, loss = self.iterate_dataloader(dataloader)
 
         torch.cuda.empty_cache()
 
@@ -412,12 +475,13 @@ def setup_trainer(config):
     _, num_genes = first_sample.shape
 
     data = instantiate_from_config(config.dataset)
-    model = instantiate_from_config(config.model, in_dim=num_genes, out_dim=num_genes)
+    model = instantiate_from_config(config.model, in_dim=num_genes)
     trainer = instantiate_from_config(
         config.trainer,
         cfg=config,
         model=model,
         data=data,
     )
+    trainer.load_pretrained()
 
     return trainer
