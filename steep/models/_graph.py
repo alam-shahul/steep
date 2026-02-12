@@ -93,6 +93,13 @@ class STAGATE(nn.Module):
 
         return h4
 
+    def decode(self, h2, edge_index):
+        """Decoding without tied weights."""
+        h3 = F.elu(self.conv3(h2, edge_index, attention=True))
+        h4 = self.conv4(h3, edge_index, attention=False)
+
+        return h4
+
     def forward(self, data):
         features = data.x
         edge_index = data.edge_index
@@ -150,6 +157,13 @@ class STAGATEVAE(STAGATE):
         eps = torch.randn_like(std)
 
         return mean + eps * std
+
+    def decode(self, h2, edge_index):
+        """Decoding without tied weights."""
+        h3 = F.elu(self.conv3(h2, edge_index, attention=True))
+        h4 = self.conv4(h3, edge_index, attention=False)
+
+        return h4
 
     def forward(self, data):
         features = data.x
