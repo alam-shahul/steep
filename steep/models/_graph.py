@@ -76,22 +76,22 @@ class STAGATE(nn.Module):
 
         return h2
 
-    def decode(self, h2, edge_index):
-        self.conv3.lin_src.data = self.conv2.lin_src.transpose(0, 1)
-        self.conv3.lin_dst.data = self.conv2.lin_dst.transpose(0, 1)
-        self.conv4.lin_src.data = self.conv1.lin_src.transpose(0, 1)
-        self.conv4.lin_dst.data = self.conv1.lin_dst.transpose(0, 1)
-        h3 = F.elu(
-            self.conv3(
-                h2,
-                edge_index,
-                attention=True,
-                tied_attention=self.conv1.attentions,
-            ),
-        )
-        h4 = self.conv4(h3, edge_index, attention=False)
+    # def decode(self, h2, edge_index):
+    #     self.conv3.lin_src.data = self.conv2.lin_src.transpose(0, 1)
+    #     self.conv3.lin_dst.data = self.conv2.lin_dst.transpose(0, 1)
+    #     self.conv4.lin_src.data = self.conv1.lin_src.transpose(0, 1)
+    #     self.conv4.lin_dst.data = self.conv1.lin_dst.transpose(0, 1)
+    #     h3 = F.elu(
+    #         self.conv3(
+    #             h2,
+    #             edge_index,
+    #             attention=True,
+    #             tied_attention=self.conv1.attentions,
+    #         ),
+    #     )
+    #     h4 = self.conv4(h3, edge_index, attention=False)
 
-        return h4
+    #     return h4
 
     def decode(self, h2, edge_index):
         """Decoding without tied weights."""
