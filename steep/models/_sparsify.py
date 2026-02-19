@@ -1,20 +1,14 @@
+import networkit as nk
+import networkx as nx
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_geometric.transforms as T
-from torch.nn import Linear, ReLU, Sequential
 from torch.distributions.normal import Normal
-from torch_geometric.nn import (
-    global_mean_pool,
-    graclus,
-    max_pool,
-    max_pool_x,
-)
+from torch.nn import Linear, ReLU, Sequential
+from torch_geometric.nn import global_mean_pool, graclus, max_pool, max_pool_x
 from torch_geometric.utils import normalized_cut
-
-import numpy as np
-import networkit as nk
-import networkx as nx
 
 
 # ------------------------------------------------------------
@@ -26,17 +20,17 @@ class BinaryStep(torch.autograd.Function):
         # Save input for custom backward
         ctx.save_for_backward(input)
         # Hard thresholding to {0,1}
-        return (input > 0.).float()
+        return (input > 0.0).float()
 
     @staticmethod
     def backward(ctx, grad_output):
         # Custom gradient shaping around the threshold region
-        input, = ctx.saved_tensors
+        (input,) = ctx.saved_tensors
         grad_input = grad_output.clone()
         zero_index = torch.abs(input) > 1
         middle_index = (torch.abs(input) <= 1) * (torch.abs(input) > 0.4)
         additional = 2 - 4 * torch.abs(input)
-        additional[zero_index] = 0.
+        additional[zero_index] = 0.0
         additional[middle_index] = 0.4
         return grad_input * additional
 
@@ -46,7 +40,8 @@ class BinaryStep(torch.autograd.Function):
 # Learns edge scores per node, then top-k per node
 # -----------------------------------------
 class SpLearner(nn.Module):
-    """Sparsification learner"""
+    """Sparsification learner."""
+
     def __init__(self, nlayers, in_dim, hidden, activation, k, weight=True, metric=None, processors=None):
         super().__init__()
 
@@ -61,7 +56,7 @@ class SpLearner(nn.Module):
 
         self.param_init()
         self.activation = activation
-        self.k = k              # target sparsity ratio (per node)
+        self.k = k  # target sparsity ratio (per node)
         self.weight = weight
 
     def param_init(self):
@@ -78,7 +73,8 @@ class SpLearner(nn.Module):
         return x
 
     def gumbel_softmax_sample(self, indices, values, temperature, training):
-        """Draw a sample from the Gumbel-Softmax distribution on a sparse edge matrix"""
+        """Draw a sample from the Gumbel-Softmax distribution on a sparse edge
+        matrix."""
         r = self.sample_gumble(values.shape)
         if training:
             values = torch.log(values) + r.to(indices.device)
@@ -131,7 +127,7 @@ class SpLearner(nn.Module):
         k_edges_per_node = torch.where(
             k_edges_per_node > 0,
             k_edges_per_node,
-            torch.ones_like(k_edges_per_node, device=k_edges_per_node.device)
+            torch.ones_like(k_edges_per_node, device=k_edges_per_node.device),
         )
 
         # Sort probs globally but keep node grouping information
@@ -142,7 +138,7 @@ class SpLearner(nn.Module):
 
         # For each node: compute index of threshold score
         edge_start_indices = torch.cat(
-            (torch.tensor([0], device=pi.device), torch.cumsum(num_edges_per_node[:-1], dim=0))
+            (torch.tensor([0], device=pi.device), torch.cumsum(num_edges_per_node[:-1], dim=0)),
         )
         edge_end_indices = torch.abs(torch.add(edge_start_indices, k_edges_per_node) - 1).long()
         node_keep_thre_cal = torch.index_select(scores_sorted, dim=-1, index=edge_end_indices)
@@ -162,7 +158,7 @@ class SpLearner(nn.Module):
 
     def write_tensor(self, x, msg):
         # Helper to dump tensor to disk for debugging
-        with open('temp.txt', "w+") as log_file:
+        with open("temp.txt", "w+") as log_file:
             log_file.write(msg)
             np.savetxt(log_file, x.cpu().detach().numpy())
 
@@ -174,14 +170,27 @@ class SpLearner(nn.Module):
 class MoE(nn.Module):
     """Sparsely gated mixture of experts layer.
 
-    Each expert is a SpLearner that outputs edge scores.
-    The gating network assigns each node to k experts.
+    Each expert is a SpLearner that outputs edge scores. The gating network
+    assigns each node to k experts.
+
     """
 
-    def __init__(self, in_dim, emb_dim, hidden_size, num_experts, nlayers,
-                 activation, k_list, expert_select, noisy_gating=True,
-                 coef=1e-2, edge_dim=1, lam=0.1):
-        super(MoE, self).__init__()
+    def __init__(
+        self,
+        in_dim,
+        emb_dim,
+        hidden_size,
+        num_experts,
+        nlayers,
+        activation,
+        k_list,
+        expert_select,
+        noisy_gating=True,
+        coef=1e-2,
+        edge_dim=1,
+        lam=0.1,
+    ):
+        super().__init__()
         self.noisy_gating = noisy_gating
         self.num_experts = num_experts
         self.k = expert_select  # how many experts a node uses
@@ -191,15 +200,18 @@ class MoE(nn.Module):
         self.num_experts = num_experts
 
         # Instantiate experts; each expert sees [x_i, x_j, edge_attr]
-        self.experts = nn.ModuleList([
-            SpLearner(
-                nlayers=nlayers,
-                in_dim=in_dim * 2 + edge_dim,
-                hidden=hidden_size,
-                activation=activation,
-                k=k
-            ) for k in k_list
-        ])
+        self.experts = nn.ModuleList(
+            [
+                SpLearner(
+                    nlayers=nlayers,
+                    in_dim=in_dim * 2 + edge_dim,
+                    hidden=hidden_size,
+                    activation=activation,
+                    k=k,
+                )
+                for k in k_list
+            ],
+        )
 
         # Gating network weights: node features -> logits over experts
         self.w_gate = nn.Parameter(torch.zeros(in_dim, num_experts), requires_grad=True)
@@ -213,7 +225,7 @@ class MoE(nn.Module):
         self.softmax = nn.Softmax(1)
         self.register_buffer("mean", torch.tensor([0.0]))
         self.register_buffer("std", torch.tensor([1.0]))
-        assert (self.k <= self.num_experts)
+        assert self.k <= self.num_experts
 
     def cv_squared(self, x):
         """Squared coefficient of variation, used as load-balancing loss."""
@@ -227,7 +239,8 @@ class MoE(nn.Module):
         return (gates > 0).sum(0)
 
     def _prob_in_top_k(self, clean_values, noisy_values, noise_stddev, noisy_top_values):
-        """Backprop-friendly probability of being in top-k under noisy gating."""
+        """Backprop-friendly probability of being in top-k under noisy
+        gating."""
         batch = clean_values.size(0)
         m = noisy_top_values.size(1)
         top_values_flat = noisy_top_values.flatten()
@@ -245,14 +258,18 @@ class MoE(nn.Module):
         return prob
 
     def noisy_top_k_gating(self, x, edge_index, train, noise_epsilon=1e-1):
-        """Noisy top-k gating (Shazeer et al. 2017). Returns node->expert gates."""
+        """Noisy top-k gating (Shazeer et al.
+
+        2017). Returns node->expert gates.
+
+        """
         # Node-level logits over experts
         clean_logits = x @ self.w_gate  # [num_nodes, num_experts]
 
         if self.noisy_gating and train:
             # Add data-dependent Gaussian noise to logits
             raw_noise_stddev = x @ self.w_noise
-            noise_stddev = (self.softplus(raw_noise_stddev) + noise_epsilon)
+            noise_stddev = self.softplus(raw_noise_stddev) + noise_epsilon
             noisy_logits = clean_logits + (torch.randn_like(clean_logits) * noise_stddev)
             logits = noisy_logits
         else:
@@ -260,8 +277,8 @@ class MoE(nn.Module):
 
         # Take top-(k+1) logits per node
         top_logits, top_indices = logits.topk(min(self.k + 1, self.num_experts), dim=1)
-        top_k_logits = top_logits[:, :self.k]       # [num_nodes, k]
-        top_k_indices = top_indices[:, :self.k]     # [num_nodes, k]
+        top_k_logits = top_logits[:, : self.k]  # [num_nodes, k]
+        top_k_indices = top_indices[:, : self.k]  # [num_nodes, k]
 
         # Softmax over selected experts, then scatter back to full expert dim
         top_k_gates = self.softmax(top_k_logits)
@@ -313,7 +330,7 @@ class MoE(nn.Module):
         k_edges_per_node = torch.where(
             k_edges_per_node > 0,
             k_edges_per_node,
-            torch.ones_like(k_edges_per_node, device=k_edges_per_node.device)
+            torch.ones_like(k_edges_per_node, device=k_edges_per_node.device),
         )
 
         # Global sort and grouping by source node
@@ -324,7 +341,7 @@ class MoE(nn.Module):
 
         # Node-specific thresholds
         edge_start_indices = torch.cat(
-            (torch.tensor([0], device=edge_index.device), torch.cumsum(num_edges_per_node[:-1], dim=0))
+            (torch.tensor([0], device=edge_index.device), torch.cumsum(num_edges_per_node[:-1], dim=0)),
         )
         edge_end_indices = torch.abs(torch.add(edge_start_indices, k_edges_per_node) - 1).long()
         node_keep_thre_cal = torch.index_select(scores_sorted, dim=-1, index=edge_end_indices)
@@ -373,7 +390,7 @@ class MoE(nn.Module):
 # -------------------------------------------------
 class MoG(nn.Module):
     def __init__(self, in_dim, emb_dim, out_channels, edge_dim, args, device, params=None):
-        super(MoG, self).__init__()
+        super().__init__()
         self.args = args
         self.device = device
         self.k_list = torch.tensor(args["k_list"], device=device)
@@ -387,9 +404,9 @@ class MoG(nn.Module):
             nlayers=args["num_layers_spl"],
             activation=nn.ReLU(),
             k_list=self.k_list,
-            expert_select=args['expert_select'],
+            expert_select=args["expert_select"],
             edge_dim=edge_dim,
-            lam=args['lam']
+            lam=args["lam"],
         )
 
         # Task GNN (NNConv + pooling)
@@ -418,7 +435,7 @@ class Net(torch.nn.Module):
             ReLU(),
             Linear(25, in_dim * 32),
         )
-        self.conv1 = NNConv(in_dim, 32, nn1, aggr='max')
+        self.conv1 = NNConv(in_dim, 32, nn1, aggr="max")
 
         # Edge network for second NNConv (2-dim edge_attr -> 32*64 weights)
         nn2 = Sequential(
@@ -426,7 +443,7 @@ class Net(torch.nn.Module):
             ReLU(),
             Linear(25, 32 * 64),
         )
-        self.conv2 = NNConv(32, 64, nn2, aggr='max')
+        self.conv2 = NNConv(32, 64, nn2, aggr="max")
 
         # Final MLP head
         self.fc1 = torch.nn.Linear(64, 128)
@@ -468,7 +485,6 @@ from typing import Callable, Tuple, Union
 import torch
 from torch import Tensor
 from torch.nn import Parameter
-
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.dense.linear import Linear
 from torch_geometric.nn.inits import reset, zeros
@@ -509,9 +525,17 @@ class NNConv(MessagePassing):
         bias (bool, optional): If :obj:`False`, no additive bias is learned.
             (default: :obj:`True`)
     """
-    def __init__(self, in_channels: Union[int, Tuple[int, int]],
-                 out_channels: int, nn: Callable, aggr: str = 'max',
-                 root_weight: bool = True, bias: bool = True, **kwargs):
+
+    def __init__(
+        self,
+        in_channels: Union[int, Tuple[int, int]],
+        out_channels: int,
+        nn: Callable,
+        aggr: str = "max",
+        root_weight: bool = True,
+        bias: bool = True,
+        **kwargs,
+    ):
         super().__init__(aggr=aggr, **kwargs)
 
         self.in_channels = in_channels
@@ -525,13 +549,17 @@ class NNConv(MessagePassing):
         self.in_channels_l = in_channels[0]
 
         if root_weight:
-            self.lin = Linear(in_channels[1], out_channels, bias=False,
-                              weight_initializer='uniform')
+            self.lin = Linear(
+                in_channels[1],
+                out_channels,
+                bias=False,
+                weight_initializer="uniform",
+            )
 
         if bias:
             self.bias = Parameter(torch.Tensor(out_channels))
         else:
-            self.register_parameter('bias', None)
+            self.register_parameter("bias", None)
 
         self.reset_parameters()
 
@@ -542,8 +570,14 @@ class NNConv(MessagePassing):
             self.lin.reset_parameters()
         zeros(self.bias)
 
-    def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj,
-                edge_attr: OptTensor = None, size: Size = None, edge_mask=None) -> Tensor:
+    def forward(
+        self,
+        x: Union[Tensor, OptPairTensor],
+        edge_index: Adj,
+        edge_attr: OptTensor = None,
+        size: Size = None,
+        edge_mask=None,
+    ) -> Tensor:
         # x: node features (or pair of source/target features)
         # edge_mask: optional per-edge scalar used to down-weight messages
 
@@ -584,5 +618,4 @@ class NNConv(MessagePassing):
         return m
 
     def __repr__(self) -> str:
-        return (f'{self.__class__.__name__}({self.in_channels}, '
-                f'{self.out_channels}, aggr={self.aggr}, nn={self.nn})')
+        return f"{self.__class__.__name__}({self.in_channels}, " f"{self.out_channels}, aggr={self.aggr}, nn={self.nn})"

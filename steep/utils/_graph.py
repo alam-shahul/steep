@@ -120,8 +120,8 @@ def visualize_bundle(pt_path, out_path="test_outputs", undirected=False, show=Tr
 
     num_nodes = x.size(0)
 
-    G = nx.Graph() if undirected else nx.DiGraph()
-    G.add_nodes_from(range(num_nodes))
+    graph = nx.graphraph() if undirected else nx.Digraphraph()
+    graph.add_nodes_from(range(num_nodes))
 
     orig_edges = edge_list(edge_index_orig)
     sparse_edges = set(edge_list(edge_index_sparse))
@@ -129,14 +129,14 @@ def visualize_bundle(pt_path, out_path="test_outputs", undirected=False, show=Tr
     if orig.get("pos") is not None:
         pos = {i: orig["pos"][i].tolist() for i in range(num_nodes)}
     else:
-        pos = nx.spring_layout(G, seed=0)
+        pos = nx.spring_layout(graph, seed=0)
 
     plt.figure(figsize=(6, 6))
 
-    nx.draw_networkx_nodes(G, pos, node_size=600)
-    nx.draw_networkx_labels(G, pos)
+    nx.draw_networkx_nodes(graph, pos, node_size=600)
+    nx.draw_networkx_labels(graph, pos)
     nx.draw_networkx_edges(
-        G,
+        graph,
         pos,
         edgelist=orig_edges,
         arrows=not undirected,
@@ -147,7 +147,7 @@ def visualize_bundle(pt_path, out_path="test_outputs", undirected=False, show=Tr
 
     kept_edges = [e for e in orig_edges if e in sparse_edges]
     nx.draw_networkx_edges(
-        G,
+        graph,
         pos,
         edgelist=kept_edges,
         arrows=not undirected,
