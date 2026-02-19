@@ -1,3 +1,5 @@
+from typing import Callable, Tuple, Union
+
 import networkit as nk
 import networkx as nx
 import numpy as np
@@ -5,15 +7,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_geometric.transforms as T
+from torch import Tensor
 from torch.distributions.normal import Normal
-from torch.nn import Linear, ReLU, Sequential
+from torch.nn import Linear, Parameter, ReLU, Sequential
 from torch_geometric.nn import global_mean_pool, graclus, max_pool, max_pool_x
+from torch_geometric.nn.conv import MessagePassing
+from torch_geometric.nn.dense.linear import Linear
+from torch_geometric.nn.inits import reset, zeros
+from torch_geometric.typing import Adj, OptPairTensor, OptTensor, Size
 from torch_geometric.utils import normalized_cut
 
 
-# ------------------------------------------------------------
-# Straight-Through Estimator for hard edge-selection (0/1 mask)
-# ------------------------------------------------------------
 class BinaryStep(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input):
@@ -475,20 +479,6 @@ class Net(torch.nn.Module):
         x = F.elu(self.fc1(x))
         x = F.dropout(x, training=self.training)
         return F.log_softmax(self.fc2(x), dim=1)
-
-
-# ============================================================
-# Custom NNConv with optional edge_mask (used in Net)
-# ============================================================
-from typing import Callable, Tuple, Union
-
-import torch
-from torch import Tensor
-from torch.nn import Parameter
-from torch_geometric.nn.conv import MessagePassing
-from torch_geometric.nn.dense.linear import Linear
-from torch_geometric.nn.inits import reset, zeros
-from torch_geometric.typing import Adj, OptPairTensor, OptTensor, Size
 
 
 class NNConv(MessagePassing):
