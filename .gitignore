@@ -5,3 +5,7 @@ __pycache__/
 .env
 *.swp
 **/.ipynb_checkpoints
+AGENTS.md
+findings.md
+progress.md
+task_plan.md
