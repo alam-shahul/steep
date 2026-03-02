@@ -288,6 +288,7 @@ class GATConv(MessagePassing):
         return_attention_weights=None,
         attention=True,
         tied_attention=None,
+        edge_mask: OptTensor = None,
     ):
         # type: (Union[Tensor, OptPairTensor], Tensor, Size, NoneType) -> Tensor  # noqa
         # type: (Union[Tensor, OptPairTensor], SparseTensor, Size, NoneType) -> Tensor  # noqa
@@ -345,7 +346,7 @@ class GATConv(MessagePassing):
                 edge_index = torch_sparse.set_diag(edge_index)
 
         # propagate_type: (x: OptPairTensor, alpha: OptPairTensor)
-        out = self.propagate(edge_index, x=x, alpha=alpha, size=size)
+        out = self.propagate(edge_index, x=x, alpha=alpha, edge_mask=edge_mask, size=size)
 
         alpha = self._alpha
         assert alpha is not None
@@ -375,6 +376,7 @@ class GATConv(MessagePassing):
         index: Tensor,
         ptr: OptTensor,
         size_i: Optional[int],
+        edge_mask: OptTensor,
     ) -> Tensor:
         # Given egel-level attention coefficients for source and target nodes,
         # we simply need to sum them up to "emulate" concatenation:
@@ -385,7 +387,13 @@ class GATConv(MessagePassing):
         alpha = softmax(alpha, index, ptr, size_i)
         self._alpha = alpha  # Save for later use.
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
-        return x_j * alpha.unsqueeze(-1)
+
+        out = x_j * alpha.unsqueeze(-1)
+
+        if edge_mask is not None:
+            out = out * edge_mask.view(-1, 1, 1)
+
+        return out
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.in_channels}, {self.out_channels}, heads={self.heads})"
