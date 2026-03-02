@@ -1,7 +1,19 @@
 import anndata as ad
 import awkward as ak
 import numpy as np
-import squidpy as sq
+
+
+def _require_squidpy():
+    try:
+        import squidpy as sq
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "squidpy is required for spatial graph construction utilities. "
+            "Install squidpy to use steep.utils.construct_spatial_graph or "
+            "steep.utils.compute_spatial_neighbors."
+        ) from exc
+
+    return sq
 
 
 def construct_spatial_graph(
@@ -26,6 +38,8 @@ def construct_spatial_graph(
     """
     if radius is None and k is None:
         raise ValueError("At least one of `k` or `radius` must be specified.")
+
+    sq = _require_squidpy()
 
     if radius is not None:
         radius = [0, radius]
@@ -60,6 +74,7 @@ def compute_spatial_neighbors(
     Stores resulting graph in ``adata.obs[adjacency_matrix_key]``.
 
     """
+    sq = _require_squidpy()
 
     sq.gr.spatial_neighbors(adata, coord_type="generic", delaunay=True)
     distance_matrix = adata.obsp["spatial_distances"]
