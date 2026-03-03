@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import anndata as ad
-import scanpy as sc
 from torch_geometric.data import Dataset
 
 from steep.utils import anndata_to_pyg
@@ -17,6 +16,8 @@ class SRTDataset(Dataset):
         return len(self.data_paths)
 
     def get(self, idx):
+        import scanpy as sc
+
         adata = ad.read_h5ad(self.data_paths[idx])
         sc.pp.normalize_total(adata, target_sum=1e4)
         sc.pp.log1p(adata)
