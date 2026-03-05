@@ -1,4 +1,5 @@
 import os
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -6,44 +7,22 @@ from torch_geometric.data import Data
 
 from steep.models._sparsify import MoG
 
+SAVE_DIR = "tests/test_outputs"
 
-SAVE_DIR = "test_outputs"
 
-
-def save_orig_and_sparsified(data, mask, tag):
+def save_mask_only(edge_index, edge_attr, mask, tag):
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     keep = mask.detach().bool()
 
-    orig_edge_index = data.edge_index.detach().cpu()
-    sparse_edge_index = data.edge_index[:, keep].detach().cpu()
-
-    bundle = {
-        "orig": {
-            "x": data.x.detach().cpu(),
-            "edge_index": orig_edge_index,
-            "pos": data.pos.detach().cpu() if hasattr(data, "pos") and data.pos is not None else None,
-            "edge_attr": data.edge_attr.detach().cpu()
-            if hasattr(data, "edge_attr") and data.edge_attr is not None
-            else None,
-            "batch": data.batch.detach().cpu() if hasattr(data, "batch") and data.batch is not None else None,
-            "y": data.y.detach().cpu() if hasattr(data, "y") and data.y is not None else None,
-        },
-        "sparse": {
-            "x": data.x.detach().cpu(),
-            "edge_index": sparse_edge_index,
-            "pos": data.pos.detach().cpu() if hasattr(data, "pos") and data.pos is not None else None,
-            "edge_attr": data.edge_attr[keep].detach().cpu()
-            if hasattr(data, "edge_attr") and data.edge_attr is not None
-            else None,
-            "batch": data.batch.detach().cpu() if hasattr(data, "batch") and data.batch is not None else None,
-            "y": data.y.detach().cpu() if hasattr(data, "y") and data.y is not None else None,
-        },
-        "mask": mask.detach().cpu(),
+    out = {
+        "orig_edge_index": edge_index,
+        "edge_mask": mask.detach().cpu(),
         "kept_edge_idx": keep.nonzero(as_tuple=False).view(-1).detach().cpu(),
+        "sparse_edge_index": edge_index[:, keep].detach().cpu(),
+        "sparse_edge_attr": (edge_attr[keep].detach().cpu() if edge_attr is not None else None),
     }
-
-    torch.save(bundle, os.path.join(SAVE_DIR, f"{tag}.pt"))
+    torch.save(out, os.path.join(SAVE_DIR, f"{tag}.pt"))
 
 
 @pytest.fixture
@@ -197,4 +176,4 @@ def test_mask_sparsity_reasonable(mog_model, tiny_graph, device):
     total = mask.numel()
     assert 0 < kept < total
 
-    save_orig_and_sparsified(data, mask, "final_sparsity_check")
+    save_mask_only(data.edge_index, data.edge_attr, mask, "final_sparsity_check")
