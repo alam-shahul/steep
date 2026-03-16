@@ -1,8 +1,16 @@
+from abc import ABC, abstractmethod
+
 from torch import Tensor, nn
 from torch_geometric.data import Data
 
 
-class VAELoss(nn.Module):
+class Loss(nn.Module):
+    @abstractmethod
+    def forward(self, inputs: Data, outputs: dict[Tensor]):
+        pass
+
+
+class VAELoss(Loss):
     def __init__(self, total_epochs: int, reduction: str = "mean"):
         super().__init__()
         self.mse = nn.MSELoss()
@@ -12,7 +20,7 @@ class VAELoss(nn.Module):
     def forward(
         self,
         inputs: Data,
-        outputs: Tensor,
+        outputs: dict[Tensor],
     ):
         mean = outputs["mean"]
         logvar = outputs["logvar"]
@@ -41,7 +49,7 @@ class GaussianKLDivergence(nn.Module):
             return kl
 
 
-class NodeMSELoss(nn.Module):
+class NodeMSELoss(Loss):
     def __init__(self):
         super().__init__()
         self.mse = nn.MSELoss()
@@ -52,6 +60,22 @@ class NodeMSELoss(nn.Module):
         outputs: dict[Tensor],
     ):
         labels = inputs.x
+        logits = outputs["logits"]
+
+        return self.mse(logits, labels)
+
+
+class NLLLoss(Loss):
+    def __init__(self):
+        super().__init__()
+        self.nll == nn.NLLLoss()
+
+    def forward(
+        self,
+        inputs: Data,
+        outputs: dict[Tensor],
+    ):
+        labels = inputs.y
         logits = outputs["logits"]
 
         return self.mse(logits, labels)

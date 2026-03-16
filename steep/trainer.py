@@ -320,7 +320,7 @@ class PyGTrainer:
         except FileExistsError:
             print(f"> Checkpoint directory already exists at {self.results_folder}")
 
-    def get_outputs_and_loss(self, inputs: Data):
+    def get_outputs_and_loss(self, inputs: Data, training: bool):
         """Run batch through model.
 
         Args:
@@ -359,7 +359,7 @@ class PyGTrainer:
 
                 lr = self.lr_scheduler.get_last_lr()[0]
 
-                batch_outputs, loss = self.get_outputs_and_loss(batch)
+                batch_outputs, loss = self.get_outputs_and_loss(batch, training=training)
                 for key in keys_to_keep:
                     outputs[key].extend(batch_outputs[key].detach().cpu().numpy())
                 del batch_outputs
