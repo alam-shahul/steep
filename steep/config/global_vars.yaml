@@ -2,4 +2,4 @@
 data_path: /work/magroup/shared/tissueFM/processed_data
 ensembl_dir: ${data_path}
 cache_dir: /work/magroup/shared/steep/
-entity: Heimdall
+entity: ${oc.env:WANDB_ENTITY,shuaikeshen2003-carnegie-mellon-university}
