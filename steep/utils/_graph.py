@@ -10,7 +10,7 @@ def _require_squidpy():
         raise ModuleNotFoundError(
             "squidpy is required for spatial graph construction utilities. "
             "Install squidpy to use steep.utils.construct_spatial_graph or "
-            "steep.utils.compute_spatial_neighbors."
+            "steep.utils.compute_spatial_neighbors.",
         ) from exc
 
     return sq

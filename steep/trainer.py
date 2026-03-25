@@ -4,19 +4,21 @@ from pathlib import Path
 from pprint import pformat
 
 import anndata as ad
-import lightning as L
+import lightning as L  # noqa: N812
 import numpy as np
 import torch
 import wandb
 from lightning.pytorch import Trainer
 from omegaconf import OmegaConf
 from torch import nn
+from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import random_split
 from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 from transformers import get_scheduler
 
+from steep.dataset import SpatialBlockSubsetDataset, build_spatial_block_node_subsets
 from steep.lightning import (
     build_lightning_callbacks,
     build_wandb_logger,
@@ -31,7 +33,6 @@ from steep.lightning import (
     restore_rng_state,
     write_config_snapshot,
 )
-from steep.dataset import SpatialBlockSubsetDataset, build_spatial_block_node_subsets
 from steep.utils import get_fully_qualified_cache_paths, instantiate_from_config
 
 
@@ -318,17 +319,14 @@ class PyGTrainer:
                 f"Dataset size {total_size} is too small for non-empty active splits {active_splits}.",
             )
 
-        sizes = {name: 0 for name in requested}
+        sizes = dict.fromkeys(requested, 0)
         for name in active_splits:
             sizes[name] = 1
 
         remaining = total_size - len(active_splits)
         if remaining > 0 and active_splits:
             total_ratio = sum(requested[name] for name in active_splits)
-            raw_allocations = {
-                name: remaining * requested[name] / total_ratio
-                for name in active_splits
-            }
+            raw_allocations = {name: remaining * requested[name] / total_ratio for name in active_splits}
             fractional_parts = []
             for name in active_splits:
                 extra = int(raw_allocations[name])

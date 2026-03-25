@@ -73,7 +73,7 @@ def _resolve_partition_sizes(
     if total_size < len(active_splits):
         raise ValueError(f"Dataset size {total_size} is too small for active splits {active_splits}.")
 
-    sizes = {name: 0 for name in requested}
+    sizes = dict.fromkeys(requested, 0)
     for name in active_splits:
         sizes[name] = 1
 
@@ -139,9 +139,7 @@ def _select_contiguous_block_ids(
 
     if target_count > 0 and accumulated == 0:
         remaining_nonempty = [
-            int(cell_id)
-            for cell_id, count in enumerate(counts.tolist())
-            if count > 0 and cell_id not in excluded_ids
+            int(cell_id) for cell_id, count in enumerate(counts.tolist()) if count > 0 and cell_id not in excluded_ids
         ]
         if remaining_nonempty:
             densest = max(remaining_nonempty, key=lambda cell_id: int(counts[cell_id].item()))
@@ -226,10 +224,7 @@ def build_spatial_block_node_subsets(
             test_ratio=test_ratio,
         )
 
-    return {
-        name: mask.nonzero(as_tuple=False).flatten()
-        for name, mask in masks.items()
-    }
+    return {name: mask.nonzero(as_tuple=False).flatten() for name, mask in masks.items()}
 
 
 class SpatialBlockSubsetDataset(Dataset):
