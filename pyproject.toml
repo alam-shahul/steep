@@ -26,6 +26,8 @@ dependencies = [  # TODO: check which are necessary
     "anndata",
     "awkward",
     "scanpy",
+    "leidenalg",
+    "igraph",
     "squidpy",
     "mygene",
 ]
@@ -96,4 +98,7 @@ dev = [
     "pre-commit",
     "pytest",
     "python-dotenv"
+]
+deepspeed = [
+    "deepspeed",
 ]
