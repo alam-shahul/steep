@@ -1,9 +1,7 @@
 from pathlib import Path
 
 import anndata as ad
-import numpy as np
 import torch
-from scipy import sparse
 from torch_geometric.data import Data, Dataset
 from torch_geometric.utils import subgraph as pyg_subgraph
 
@@ -11,47 +9,16 @@ from steep.utils import anndata_to_pyg
 
 
 class SRTDataset(Dataset):
-    @staticmethod
-    def _normalize_and_log1p(x, target_sum: float = 1e4):
-        if sparse.issparse(x):
-            x = x.tocsr(copy=True)
-            if not np.issubdtype(x.dtype, np.floating):
-                x = x.astype(np.float32)
-            counts_per_obs = np.asarray(x.sum(axis=1)).reshape(-1).astype(np.float32, copy=False)
-            scale = np.divide(
-                target_sum,
-                counts_per_obs,
-                out=np.zeros_like(counts_per_obs, dtype=np.float32),
-                where=counts_per_obs > 0,
-            )
-            x.data *= np.repeat(scale, np.diff(x.indptr))
-            x.data = np.log1p(x.data)
-            return x
-
-        x = np.asarray(x, dtype=np.float32)
-        counts_per_obs = x.sum(axis=1, dtype=np.float32)
-        scale = np.divide(
-            target_sum,
-            counts_per_obs,
-            out=np.zeros_like(counts_per_obs, dtype=np.float32),
-            where=counts_per_obs > 0,
-        )
-        x *= scale[:, None]
-        np.log1p(x, out=x)
-        return x
-
     def __init__(self, data_directory: str, transform=None):
         super().__init__(None, transform=transform)
         self.data_directory = Path(data_directory)
-        self.data_paths = list(self.data_directory.iterdir())
+        self.data_paths = sorted(self.data_directory.glob("*.h5ad"))
 
     def len(self):  # noqa: A003
         return len(self.data_paths)
 
     def get(self, idx):
         adata = ad.read_h5ad(self.data_paths[idx])
-        adata.X = self._normalize_and_log1p(adata.X)
-
         data = anndata_to_pyg(adata)
         # print(f'{data.x.size()=}')
         # print(f'{data.edge_index.size()=}')
