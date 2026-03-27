@@ -1,14 +1,42 @@
+import logging
 import os
 import random
+from distutils import log as distutils_log
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
 import torch
-
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks.progress import TQDMProgressBar
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf
+from tqdm.utils import _screen_shape_wrapper
+
+
+def allow_trusted_checkpoint_globals() -> None:
+    """Allow trusted NumPy globals needed by PyTorch 2.6 weights-only checkpoint
+    loading."""
+    add_safe_globals = getattr(torch.serialization, "add_safe_globals", None)
+    if add_safe_globals is None:
+        return
+
+    safe_globals = [
+        np.core.multiarray._reconstruct,
+        np.ndarray,
+        np.dtype,
+        type(np.dtype(np.uint32)),
+        type(np.dtype(np.float32)),
+        type(np.dtype(np.int64)),
+    ]
+    try:
+        add_safe_globals(safe_globals)
+    except Exception:
+        pass
+
+
+allow_trusted_checkpoint_globals()
 
 
 def infer_accelerator(device: str | None = None, accelerator: str | None = None) -> str:
@@ -120,8 +148,68 @@ def cleanup_distributed() -> None:
         deepspeed_groups.expert_tensor_parallel_world_size = 1
 
 
+def suppress_deepspeed_probe_logging() -> None:
+    """Suppress noisy compiler probe logs emitted by DeepSpeed op builders."""
+    distutils_log.set_threshold(distutils_log.WARN)
+    distutils_log.set_verbosity = lambda *args, **kwargs: None  # type: ignore[assignment]
+
+    root_logger = logging.getLogger()
+    if root_logger.level in (logging.NOTSET, logging.DEBUG, logging.INFO):
+        root_logger.setLevel(logging.WARNING)
+
+
+class _DynamicWidthTQDMProgressBar(TQDMProgressBar):
+    """Progress bar that expands to the terminal width when possible."""
+
+    @staticmethod
+    def _enable_dynamic_width(bar):
+        bar.dynamic_ncols = _screen_shape_wrapper()
+        return bar
+
+    def init_train_tqdm(self):
+        return self._enable_dynamic_width(super().init_train_tqdm())
+
+    def init_validation_tqdm(self):
+        return self._enable_dynamic_width(super().init_validation_tqdm())
+
+    def init_test_tqdm(self):
+        return self._enable_dynamic_width(super().init_test_tqdm())
+
+    def init_predict_tqdm(self):
+        return self._enable_dynamic_width(super().init_predict_tqdm())
+
+    def init_sanity_tqdm(self):
+        return self._enable_dynamic_width(super().init_sanity_tqdm())
+
+
+class _EpochTimerCallback(Callback):
+    """Collect wall-clock epoch durations for benchmark reporting."""
+
+    def __init__(self):
+        self.epoch_times_seconds: list[float] = []
+        self._epoch_start_time: float | None = None
+
+    def on_fit_start(self, trainer, pl_module) -> None:
+        del trainer, pl_module
+        self.epoch_times_seconds = []
+        self._epoch_start_time = None
+
+    def on_train_epoch_start(self, trainer, pl_module) -> None:
+        del trainer, pl_module
+        self._epoch_start_time = perf_counter()
+
+    def on_train_epoch_end(self, trainer, pl_module) -> None:
+        del trainer, pl_module
+        if self._epoch_start_time is None:
+            return
+        self.epoch_times_seconds.append(perf_counter() - self._epoch_start_time)
+        self._epoch_start_time = None
+
+
 def build_lightning_callbacks(results_folder: Path, enable_lr_monitor: bool = True) -> list:
     callbacks = [
+        _DynamicWidthTQDMProgressBar(),
+        _EpochTimerCallback(),
         ModelCheckpoint(
             dirpath=str(results_folder),
             filename="epoch{epoch:04d}",
@@ -230,9 +318,7 @@ def extract_submodule_state_dict(
     state_dict = checkpoint.get("state_dict")
     if isinstance(state_dict, dict):
         extracted_state = {
-            key[len(lightning_prefix):]: value
-            for key, value in state_dict.items()
-            if key.startswith(lightning_prefix)
+            key[len(lightning_prefix) :]: value for key, value in state_dict.items() if key.startswith(lightning_prefix)
         }
         if extracted_state:
             return extracted_state
