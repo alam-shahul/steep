@@ -5,7 +5,30 @@ from pathlib import Path
 from pprint import pformat
 from typing import Any
 
+import anndata as ad
+import numpy as np
+import torch
 from omegaconf import DictConfig, OmegaConf
+
+
+def to_builtin(value: Any):
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return value.detach().cpu().item()
+        return value.detach().cpu().tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def num_edges_from_adata(adata: ad.AnnData, adjacency_matrix_key: str = "adjacency_matrix") -> int:
+    adjacency = adata.obsp[adjacency_matrix_key]
+    nnz = getattr(adjacency, "nnz", None)
+    if nnz is not None:
+        return int(nnz)
+    return int(np.count_nonzero(np.asarray(adjacency)))
 
 
 def get_name(target: str):
