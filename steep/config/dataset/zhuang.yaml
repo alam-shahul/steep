@@ -1,0 +1,5 @@
+name: zhuang
+type: steep.dataset.SRTDataset
+
+args:
+  data_directory: ${data_path}/zhuang
