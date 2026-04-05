@@ -1,0 +1,5 @@
+type: steep.sketcher.RandomSubsampleSketcher
+
+args:
+  retention_ratio: 0.1
+  random_seed: 0

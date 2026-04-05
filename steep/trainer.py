@@ -7,7 +7,6 @@ import anndata as ad
 import lightning as L  # noqa: N812
 import numpy as np
 import torch
-import wandb
 from lightning.pytorch import Trainer
 from omegaconf import OmegaConf
 from torch import nn
@@ -16,8 +15,8 @@ from torch.utils.data import random_split
 from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
-from transformers import get_scheduler
 
+import wandb
 from steep.dataset import SpatialBlockSubsetDataset, build_spatial_block_node_subsets
 from steep.lightning import (
     build_lightning_callbacks,
@@ -31,9 +30,10 @@ from steep.lightning import (
     get_resume_checkpoint_path,
     infer_accelerator,
     restore_rng_state,
+    suppress_deepspeed_probe_logging,
     write_config_snapshot,
 )
-from steep.utils import get_fully_qualified_cache_paths, instantiate_from_config
+from steep.utils import get_fully_qualified_cache_paths, get_scheduler, instantiate_from_config
 
 
 class _PyGLightningModule(L.LightningModule):
@@ -390,6 +390,7 @@ class PyGTrainer:
     def _validate_lightning_strategy(self, accelerator: str) -> None:
         if not isinstance(self.strategy, str) or not self.strategy.startswith("deepspeed"):
             return
+        suppress_deepspeed_probe_logging()
         if accelerator != "gpu":
             raise ValueError("DeepSpeed strategy requires `accelerator=gpu`.")
         try:
@@ -702,6 +703,29 @@ class PyGTrainer:
             epoch=epoch,
         )
 
+    def warmup_dataloaders(self) -> None:
+        """Run one datalaoder batch without updating optimizer or scheduler
+        state."""
+        if len(self.dataloaders["train"]) == 0:
+            return
+
+        self.model.train()
+        for _, dataloader in self.dataloaders.items():
+            batch = next(iter(dataloader))
+            batch = batch.to(self.device)
+
+        self.optimizer.zero_grad(set_to_none=True)
+        batch_outputs, loss = self.get_outputs_and_loss(batch)
+        loss.backward()
+        self.optimizer.zero_grad(set_to_none=True)
+
+        del batch_outputs
+        del loss
+        del batch
+
+        if self.device.startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
     def fit(
         self,
         resume_from_checkpoint=True,
@@ -710,14 +734,20 @@ class PyGTrainer:
         """Fit the model to the train DataLoader."""
         del start_epoch
 
+        self.last_fit_reused_checkpoint = False
+        self.last_fit_skipped_training = False
+
         self.initialize_checkpointing()
         write_config_snapshot(self.results_folder, self.cfg)
 
         if self.epochs <= 0:
+            self.last_fit_skipped_training = True
             return
 
         ckpt_path = self._prepare_resume_checkpoint(resume_from_checkpoint)
+        self.last_fit_reused_checkpoint = bool(ckpt_path) or self._legacy_resume_epoch > 0
         if ckpt_path is None and self._legacy_resume_epoch >= self.epochs:
+            self.last_fit_skipped_training = True
             return
         self.lightning_module = _PyGLightningModule(self)
         self.lightning_trainer = self._build_lightning_trainer()
@@ -737,7 +767,7 @@ class PyGTrainer:
 def setup_trainer(config):
     # Inferring num_genes
     data_directory = Path(config.dataset.args.data_directory)
-    first_filepath = next(data_directory.iterdir())
+    first_filepath = next(data_directory.glob("*.h5ad"))
     first_sample = ad.read_h5ad(first_filepath)
     _, num_genes = first_sample.shape
 

@@ -1,6 +1,7 @@
 import hashlib
 import importlib
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 from pprint import pformat
 from typing import Any
@@ -21,6 +22,18 @@ def to_builtin(value: Any):
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+def drop_none_values(value):
+    if isinstance(value, dict):
+        return {key: drop_none_values(item) for key, item in value.items() if item is not None}
+    if isinstance(value, list):
+        return [drop_none_values(item) for item in value]
+    return value
+
+
+def serialize_dataclass(value) -> dict[str, Any]:
+    return drop_none_values(asdict(value))
 
 
 def num_edges_from_adata(adata: ad.AnnData, adjacency_matrix_key: str = "adjacency_matrix") -> int:
