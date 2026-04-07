@@ -145,6 +145,8 @@ class PyGTrainer:
         "trainer.args.val_ratio",
         "trainer.args.split_type",
         "trainer.args.spatial_block_grid_size",
+        "sketcher.args.retention_ratio",
+        "sketcher.args.random_seed",
     )
 
     def __init__(
@@ -704,24 +706,29 @@ class PyGTrainer:
         )
 
     def warmup_dataloaders(self) -> None:
-        """Run one datalaoder batch without updating optimizer or scheduler
+        """Warm one batch from each dataloader without updating training
         state."""
         if len(self.dataloaders["train"]) == 0:
             return
 
         self.model.train()
-        for _, dataloader in self.dataloaders.items():
+        self.optimizer.zero_grad(set_to_none=True)
+
+        for split, dataloader in self.dataloaders.items():
+            if len(dataloader) == 0:
+                continue
+
             batch = next(iter(dataloader))
             batch = batch.to(self.device)
+            batch_outputs, loss = self.get_outputs_and_loss(batch)
+            if split == "train":
+                loss.backward()
+
+            del batch_outputs
+            del loss
+            del batch
 
         self.optimizer.zero_grad(set_to_none=True)
-        batch_outputs, loss = self.get_outputs_and_loss(batch)
-        loss.backward()
-        self.optimizer.zero_grad(set_to_none=True)
-
-        del batch_outputs
-        del loss
-        del batch
 
         if self.device.startswith("cuda") and torch.cuda.is_available():
             torch.cuda.synchronize()
