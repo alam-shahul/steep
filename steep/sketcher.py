@@ -5,6 +5,7 @@ from pathlib import Path
 
 import anndata as ad
 import numpy as np
+from geosketch import gs
 from torch_geometric.data import Data
 
 from steep.utils import hopper_sketch_indices, num_edges_from_adata
@@ -124,6 +125,86 @@ class HopperSketcher(AnnDataSketcher):
                 num_points=sample_size,
                 random_seed=self.random_seed,
             ),
+        )
+        return adata[selected_indices, :].copy()
+
+
+class SpatialHopperSketcher(AnnDataSketcher):
+    """Farthest-point sampling based on spatial coordinates (x, y).
+
+    Ensures a spatially uniform coverage of the tissue.
+
+    """
+
+    def __init__(self, retention_ratio: float, random_seed: int = 0, spatial_key: str = "spatial"):
+        super().__init__()
+        self.retention_ratio = retention_ratio
+        self.random_seed = random_seed
+        self.spatial_key = spatial_key
+
+    def transform(self, adata: ad.AnnData) -> ad.AnnData:
+        num_cells = int(adata.n_obs)
+        sample_size = max(1, int(np.ceil(num_cells * self.retention_ratio)))
+
+        if sample_size >= num_cells:
+            return adata.copy()
+
+        if self.spatial_key not in adata.obsm:
+            raise KeyError(f"Spatial coordinates not found in adata.obsm['{self.spatial_key}']")
+
+        coords = adata.obsm[self.spatial_key]
+        if sp.issparse(coords):
+            coords = coords.toarray()
+
+        selected_indices = np.sort(
+            hopper_sketch_indices(
+                coords,
+                num_points=sample_size,
+                random_seed=self.random_seed,
+            ),
+        )
+        return adata[selected_indices, :].copy()
+
+
+class GeoSketcher(AnnDataSketcher):
+    """Geometric sketching to sample uniformly from high-dimensional space."""
+
+    def __init__(self, retention_ratio: float, random_seed: int = 0):
+        self.retention_ratio = retention_ratio
+        self.random_seed = random_seed
+
+    def transform(self, adata: ad.AnnData) -> ad.AnnData:
+
+        X = adata.obsm["X_pca"] if "X_pca" in adata.obsm else adata.X
+        num_cells = adata.n_obs
+        sample_size = max(1, int(np.ceil(num_cells * self.retention_ratio)))
+
+        selected_indices = gs(X, sample_size, seed=self.random_seed)
+        return adata[np.sort(selected_indices), :].copy()
+
+
+class LeverageScoreSketcher(AnnDataSketcher):
+    """Samples cells based on the statistical leverage scores in PCA space."""
+
+    def __init__(self, retention_ratio: float, random_seed: int = 0, n_components: int = 50):
+        self.retention_ratio = retention_ratio
+        self.random_seed = random_seed
+        self.n_components = n_components
+
+    def transform(self, adata: ad.AnnData) -> ad.AnnData:
+        if "X_pca" not in adata.obsm:
+            raise KeyError("Please run PCA (sc.tl.pca) before using LeverageScoreSketcher.")
+
+        U = adata.obsm["X_pca"][:, : self.n_components]
+        leverage_scores = np.sum(U**2, axis=1)
+        probs = leverage_scores / np.sum(leverage_scores)
+
+        num_cells = adata.n_obs
+        sample_size = max(1, int(np.ceil(num_cells * self.retention_ratio)))
+
+        rng = np.random.default_rng(self.random_seed)
+        selected_indices = np.sort(
+            rng.choice(num_cells, size=sample_size, replace=False, p=probs),
         )
         return adata[selected_indices, :].copy()
 
