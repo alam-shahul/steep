@@ -145,6 +145,7 @@ class PyGTrainer:
         "trainer.args.val_ratio",
         "trainer.args.split_type",
         "trainer.args.spatial_block_grid_size",
+        "sketcher.type",
         "sketcher.args.retention_ratio",
         "sketcher.args.random_seed",
     )
