@@ -20,7 +20,7 @@ dependencies = [  # TODO: check which are necessary
     "scipy",
     "scikit-learn",
     "torchmetrics",
-    "torch>=2.0",
+    "torch==2.5.1",
     "torch_geometric",
     "lightning",
     "anndata",
