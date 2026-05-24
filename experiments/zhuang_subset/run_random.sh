@@ -7,7 +7,7 @@
 #SBATCH -t 1-23:00:00
 #SBATCH --array=0-44   # 9 ratios × 5 seeds = 45 jobs
 
-name=geosketch
+name=edge_random
 OUTDIR="/work/magroup/xinyuelu/steep/experiments/zhuang_subset/records/$name"
 mkdir -p $OUTDIR
 
