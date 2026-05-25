@@ -87,6 +87,7 @@ def evaluate_and_plot_slide_embeddings(
     random_seed,
     n_neighbors,
     leiden_resolution,
+    clustering_backend="scanpy",
     slide_name=None,
     obs_names=None,
     spatial=None,
@@ -98,6 +99,7 @@ def evaluate_and_plot_slide_embeddings(
         random_seed=random_seed,
         n_neighbors=n_neighbors,
         leiden_resolution=leiden_resolution,
+        clustering_backend=clustering_backend,
     )
     results = evaluate_slide_embeddings(
         labels_by_key=labels_by_key,
@@ -150,6 +152,7 @@ def evaluate_sketch_cluster_agreement(
     random_seed: int,
     n_neighbors: int,
     leiden_resolution: float,
+    clustering_backend: str = "scanpy",
     label_key: str = "original_leiden",
 ) -> dict[str, object]:
     """Compare sketch-model clusters against clusters from the full-data
@@ -174,6 +177,7 @@ def evaluate_sketch_cluster_agreement(
             random_seed=random_seed,
             n_neighbors=n_neighbors,
             leiden_resolution=leiden_resolution,
+            clustering_backend=clustering_backend,
         )
         reference_clusterings[record.slide_name] = pd.Series(predicted, index=record.obs_names)
 
@@ -195,6 +199,7 @@ def evaluate_sketch_cluster_agreement(
                 "random_seed": random_seed,
                 "n_neighbors": n_neighbors,
                 "leiden_resolution": leiden_resolution,
+                "clustering_backend": clustering_backend,
             },
         )
 

@@ -103,3 +103,10 @@ dev = [
 deepspeed = [
     "deepspeed",
 ]
+rapids-cu12 = [
+    "rapids-singlecell-cu12[rapids]",
+]
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com/simple"

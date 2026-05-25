@@ -65,6 +65,7 @@ def cluster_embeddings(
     random_seed: int = 0,
     n_neighbors: int = 15,
     leiden_resolution: float = 1.0,
+    clustering_backend: str = "scanpy",
 ) -> np.ndarray:
 
     clustering_adata = ad.AnnData(X=np.asarray(embeddings, dtype=np.float32))
@@ -72,13 +73,39 @@ def cluster_embeddings(
 
     num_cells = clustering_adata.n_obs
     effective_neighbors = max(2, min(int(n_neighbors), num_cells - 1))
-    sc.pp.neighbors(clustering_adata, use_rep="X_stagate", n_neighbors=effective_neighbors)
-    sc.tl.leiden(
-        clustering_adata,
-        key_added="predicted_leiden",
-        resolution=float(leiden_resolution),
-        random_state=int(random_seed),
-    )
+    if clustering_backend == "scanpy":
+        sc.pp.neighbors(clustering_adata, use_rep="X_stagate", n_neighbors=effective_neighbors)
+        sc.tl.leiden(
+            clustering_adata,
+            key_added="predicted_leiden",
+            resolution=float(leiden_resolution),
+            random_state=int(random_seed),
+        )
+    elif clustering_backend == "rapids":
+        try:
+            import rapids_singlecell as rsc
+        except ImportError as exc:
+            raise ImportError(
+                "RAPIDS clustering backend requires rapids-singlecell. "
+                "Install it with `uv sync --group rapids-cu12`.",
+            ) from exc
+
+        rsc.get.anndata_to_GPU(clustering_adata, convert_all=True)
+        rsc.pp.neighbors(
+            clustering_adata,
+            use_rep="X_stagate",
+            n_neighbors=effective_neighbors,
+            random_state=int(random_seed),
+        )
+        rsc.tl.leiden(
+            clustering_adata,
+            key_added="predicted_leiden",
+            resolution=float(leiden_resolution),
+            random_state=int(random_seed),
+        )
+    else:
+        raise ValueError(f"Unsupported clustering_backend: {clustering_backend!r}.")
+
     return clustering_adata.obs["predicted_leiden"].to_numpy()
 
 
@@ -116,6 +143,7 @@ def evaluate_slide_cluster_agreement(
     random_seed: int,
     n_neighbors: int,
     leiden_resolution: float,
+    clustering_backend: str = "scanpy",
 ) -> dict[str, float | int] | None:
     warnings.simplefilter("ignore")
 
@@ -129,6 +157,7 @@ def evaluate_slide_cluster_agreement(
         random_seed=random_seed,
         n_neighbors=n_neighbors,
         leiden_resolution=leiden_resolution,
+        clustering_backend=clustering_backend,
     )
     return {
         "ari": float(adjusted_rand_score(reference_labels, predicted)),

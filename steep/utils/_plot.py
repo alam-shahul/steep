@@ -21,6 +21,8 @@ def save_slide_clustering_plot(
     plot_adata = ad.AnnData(obs=pd.DataFrame(index=obs_names))
     plot_adata.obsm["spatial"] = np.asarray(spatial)
     plot_adata.obs["predicted_leiden"] = pd.Categorical(np.asarray(predicted_labels).astype(str))
+    library_id = Path(slide_name).stem
+    plot_adata.uns["spatial"] = {library_id: {}}
 
     squidpy_logger = logging.getLogger("squidpy")
     previous_level = squidpy_logger.level
@@ -28,6 +30,7 @@ def save_slide_clustering_plot(
     try:
         sq.pl.spatial_scatter(
             plot_adata,
+            library_id=library_id,
             color="predicted_leiden",
             title=slide_name,
             shape=None,

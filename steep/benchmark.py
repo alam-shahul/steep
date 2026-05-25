@@ -92,6 +92,7 @@ class Benchmark:
         random_seed: int = 0,
         n_neighbors: int = 15,
         leiden_resolution: float = 1.0,
+        clustering_backend: str = "scanpy",
         resume_from_checkpoint: bool = True,
         run_wandb: bool = False,
     ):
@@ -102,6 +103,7 @@ class Benchmark:
         self.random_seed = int(random_seed)
         self.n_neighbors = int(n_neighbors)
         self.leiden_resolution = float(leiden_resolution)
+        self.clustering_backend = str(clustering_backend)
         self.resume_from_checkpoint = bool(resume_from_checkpoint)
         self.run_wandb = bool(run_wandb)
 
@@ -146,6 +148,7 @@ class Benchmark:
             random_seed=self.random_seed,
             n_neighbors=self.n_neighbors,
             leiden_resolution=self.leiden_resolution,
+            clustering_backend=self.clustering_backend,
         )
         sketch.evaluation.label_keys = [
             *(sketch.evaluation.label_keys or []),
@@ -166,7 +169,17 @@ class Benchmark:
         eval_dir = get_fully_qualified_cache_paths(
             trainer_cfg,
             Path(self.cfg.cache_dir) / "evaluations",
-            keys=("dataset.args.data_directory", "model", "trainer", "sketcher"),
+            keys=(
+                "dataset.args.data_directory",
+                "model",
+                "trainer",
+                "sketcher",
+                "benchmark.args.label_keys",
+                "benchmark.args.random_seed",
+                "benchmark.args.n_neighbors",
+                "benchmark.args.leiden_resolution",
+                "benchmark.args.clustering_backend",
+            ),
         )
         eval_dir.mkdir(parents=True, exist_ok=True)
 
@@ -201,6 +214,7 @@ class Benchmark:
                     "random_seed": self.random_seed,
                     "n_neighbors": self.n_neighbors,
                     "leiden_resolution": self.leiden_resolution,
+                    "clustering_backend": self.clustering_backend,
                     "slide_name": slide_record.slide_name,
                     "obs_names": slide_record.obs_names,
                     "spatial": slide_record.spatial,
