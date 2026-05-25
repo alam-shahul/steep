@@ -1,15 +1,17 @@
-"""Cell type classification evaluator using frozen embeddings + logistic
-regression."""
+"""Cell type classification evaluator using frozen embeddings + kNN."""
 
 import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.neighbors import KNeighborsClassifier
 
 CLASSIFICATION_METRIC_NAMES = ("accuracy", "macro_f1", "weighted_f1")
+
+# Number of neighbors used by the kNN classifier.
+DEFAULT_N_NEIGHBORS = 5
 
 
 @dataclass
@@ -75,31 +77,33 @@ def evaluate_slide_classification(
     train_mask: np.ndarray,
     random_seed: int = 0,
     max_iter: int = 1000,
+    n_neighbors: int = DEFAULT_N_NEIGHBORS,
 ) -> dict[str, dict[str, float | int] | None]:
-    """Train logistic regression per label_key on train cells, evaluate on test
+    """Fit a kNN classifier per label_key on train cells, evaluate on test
     cells.
 
     Args:
         labels_by_key: dict of label_key -> array of labels for all cells in this slide.
         embeddings: (n_cells, embed_dim) embedding matrix for all cells in this slide.
         train_mask: boolean array of length n_cells; True = train, False = test.
-        random_seed: seed for LogisticRegression.
-        max_iter: max_iter for LogisticRegression.
+        random_seed: unused for kNN.
+        max_iter: unused for kNN.
+        n_neighbors: k for kNN. Default 5.
 
     Returns:
-        dict of label_key -> {accuracy, macro_f1, weighted_f1, count} or None if not evaluable.
+        dict of label_key -> {accuracy, macro_f1, weighted_f1, count, ...} or None
+        if not evaluable.
 
     """
+    del random_seed, max_iter
+
     warnings.simplefilter("ignore")
 
     test_mask = ~train_mask
     if train_mask.sum() < 2 or test_mask.sum() < 1:
         return {label_key: None for label_key in labels_by_key}
 
-    X_train = embeddings[train_mask]
-    X_test = embeddings[test_mask]
-
-    results = {}
+    results: dict[str, dict[str, float | int] | None] = {}
     for label_key, labels in labels_by_key.items():
         valid_train = train_mask & ~pd.isna(labels)
         valid_test = test_mask & ~pd.isna(labels)
@@ -124,11 +128,8 @@ def evaluate_slide_classification(
         X_test_k = embeddings[valid_test][test_known_class_mask]
         y_test_k = y_test[test_known_class_mask]
 
-        clf = LogisticRegression(
-            max_iter=max_iter,
-            n_jobs=-1,
-            random_state=random_seed,
-        )
+        effective_k = min(int(n_neighbors), int(X_train_k.shape[0]))
+        clf = KNeighborsClassifier(n_neighbors=effective_k, n_jobs=1)
         clf.fit(X_train_k, y_train)
         y_pred = clf.predict(X_test_k)
 
@@ -137,6 +138,10 @@ def evaluate_slide_classification(
             "macro_f1": float(f1_score(y_test_k, y_pred, average="macro", zero_division=0)),
             "weighted_f1": float(f1_score(y_test_k, y_pred, average="weighted", zero_division=0)),
             "count": int(len(y_test_k)),
+            "n_classes_train": int(len(train_classes)),
+            "n_train": int(X_train_k.shape[0]),
+            "n_neighbors": int(effective_k),
+            "classifier": "KNeighborsClassifier",
             "n_test_dropped_unknown_class": int((~test_known_class_mask).sum()),
         }
 
