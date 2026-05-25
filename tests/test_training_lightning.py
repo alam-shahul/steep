@@ -131,6 +131,37 @@ def test_pyg_trainer_lightning_fit_saves_last_checkpoint(tmp_path):
     assert (trainer.results_folder / "last.ckpt").exists()
 
 
+def test_pyg_trainer_fresh_fit_removes_existing_checkpoint_directory(tmp_path):
+    cfg = _make_trainer_cfg(tmp_path)
+    trainer = PyGTrainer(
+        cfg=cfg,
+        model=ToyAutoencoder(),
+        data=_make_toy_dataset(),
+        batchsize=2,
+        epochs=1,
+        device="cpu",
+        train_ratio=0.6,
+        val_ratio=0.2,
+        accelerator="cpu",
+        devices=1,
+        strategy="auto",
+        precision="32-true",
+        num_sanity_val_steps=0,
+        num_workers=0,
+        persistent_workers=False,
+        pin_memory=False,
+        run_wandb=False,
+    )
+    stale_file = trainer.get_checkpoint_directory() / "stale.txt"
+    stale_file.parent.mkdir(parents=True)
+    stale_file.write_text("old checkpoint state")
+
+    trainer.fit(resume_from_checkpoint=False)
+
+    assert not stale_file.exists()
+    assert (trainer.results_folder / "last.ckpt").exists()
+
+
 def test_pyg_trainer_load_pretrained_from_lightning_checkpoint(tmp_path):
     cfg = _make_trainer_cfg(tmp_path)
     trainer = PyGTrainer(

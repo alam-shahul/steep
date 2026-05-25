@@ -15,6 +15,7 @@ from steep.utils._cluster import (
     summarize_cluster_scores,
 )
 from steep.utils._embedding import extract_slide_embedding_records
+from steep.utils._plot import save_slide_clustering_plot
 
 
 def test_cluster_embeddings_scanpy_backend_returns_one_label_per_embedding():
@@ -110,6 +111,29 @@ def test_cluster_metric_store_accumulates_and_summarizes():
     assert metrics["ari_weighted_mean"] == (0.5 * 10 + 0.7 * 20) / 30
     assert metrics["nmi_weighted_mean"] == (0.6 * 10 + 0.8 * 20) / 30
     assert metrics["evaluated_slides"] == 2
+
+
+def test_save_slide_clustering_plot_sets_squidpy_library_id(tmp_path: Path):
+    captured = {}
+
+    def spatial_scatter(adata, library_id, **kwargs):
+        captured["library_id"] = library_id
+        captured["uns_spatial"] = adata.uns["spatial"]
+        captured["kwargs"] = kwargs
+
+    with patch("steep.utils._plot.sq.pl.spatial_scatter", side_effect=spatial_scatter):
+        with patch("steep.utils._plot.plt.savefig"):
+            save_slide_clustering_plot(
+                slide_name="batch_001.h5ad",
+                obs_names=np.array(["a", "b"]),
+                spatial=np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float32),
+                predicted_labels=np.array(["0", "1"]),
+                output_path=tmp_path / "plot.png",
+            )
+
+    assert captured["library_id"] == "batch_001"
+    assert captured["uns_spatial"] == {"batch_001": {}}
+    assert captured["kwargs"]["color"] == "predicted_leiden"
 
 
 def test_extract_slide_embedding_records_returns_expected_fields(tmp_path: Path):

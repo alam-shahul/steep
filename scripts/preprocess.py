@@ -6,6 +6,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import anndata as ad
+from loguru import logger
 from tqdm import tqdm
 
 from steep.utils import preprocess
@@ -66,7 +67,8 @@ def main() -> None:
             raise ValueError("`--num-slides` must be a positive integer.")
         if args.num_slides > len(input_paths):
             raise ValueError(
-                f"`--num-slides` ({args.num_slides}) cannot exceed the number of available .h5ad files ({len(input_paths)}).",
+                f"`--num-slides` ({args.num_slides}) cannot exceed the number of available .h5ad files "
+                f"({len(input_paths)}).",
             )
         rng = random.Random(args.seed)
         input_paths = sorted(rng.sample(input_paths, k=args.num_slides))
@@ -74,7 +76,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     jobs = [(input_path, output_dir / input_path.name) for input_path in input_paths]
     for input_path, output_path in jobs:
-        print(f"Preprocessing {input_path} -> {output_path}")
+        logger.info("Preprocessing {} -> {}", input_path, output_path)
 
     max_workers = args.num_workers if args.num_workers is not None else (os.cpu_count() or 1)
     if max_workers <= 0:

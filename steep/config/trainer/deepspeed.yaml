@@ -19,7 +19,7 @@ args:
   enable_progress_bar: true
   enable_model_summary: false
   num_sanity_val_steps: 0
-  num_workers: null
-  persistent_workers: null
-  pin_memory: null
+  num_workers: 0
+  persistent_workers:
+  pin_memory:
   run_wandb: false

@@ -1,4 +1,5 @@
 import random
+import shutil
 from collections import defaultdict
 from pathlib import Path
 from pprint import pformat
@@ -8,6 +9,7 @@ import lightning as L  # noqa: N812
 import numpy as np
 import torch
 from lightning.pytorch import Trainer
+from loguru import logger
 from omegaconf import OmegaConf
 from torch import nn
 from torch.nn.utils import clip_grad_norm_
@@ -263,6 +265,7 @@ class PyGTrainer:
             "full": self.data,
         }
         self.dataloaders = {}
+        dataloader_summaries = []
         for split, split_dataset in self.datasets.items():
             dataloader_kwargs = {}
             if self.num_workers > 0:
@@ -278,7 +281,9 @@ class PyGTrainer:
                 **dataloader_kwargs,
             )
             self.dataloaders[split] = dataloader
-            print(f"{split} DataLoader has size {len(dataloader)}")
+            dataloader_summaries.append(f"{split}: {len(dataloader)} batches/{len(split_dataset)} samples")
+
+        logger.info("DataLoaders initialized ({})", ", ".join(dataloader_summaries))
 
     def _build_spatial_block_datasets(self) -> tuple[Dataset, Dataset, Dataset]:
         node_subsets = {
@@ -352,7 +357,7 @@ class PyGTrainer:
         )
 
     def _initialize_wandb(self, **wandb_kwargs):
-        print("==> Starting a new WANDB run")
+        logger.info("Starting a new WANDB run")
         new_tags = (self.cfg.dataset.name,)
         wandb_kwargs = {
             "tags": new_tags,
@@ -366,7 +371,7 @@ class PyGTrainer:
             config=OmegaConf.to_container(self.cfg, resolve=True),
             **wandb_kwargs,
         )
-        print("==> Initialized Run")
+        logger.info("Initialized WANDB run")
 
     def _initialize_lr_scheduler(self):
         global_batch_size = self.batchsize
@@ -437,12 +442,12 @@ class PyGTrainer:
             return None
 
         if resume_path.endswith(".ckpt"):
-            print(f"> Resuming Lightning checkpoint from {resume_path}")
+            logger.info("Resuming Lightning checkpoint from {}", resume_path)
             return resume_path
 
-        print(f"> Loading legacy checkpoint state from {resume_path}")
+        logger.info("Loading legacy checkpoint state from {}", resume_path)
         self._legacy_resume_epoch = self.load_checkpoint()
-        print("> Loaded legacy trainer state; continuing under Lightning without loop-state resume.")
+        logger.info("Loaded legacy trainer state; continuing under Lightning without loop-state resume")
         return None
 
     def save_checkpoint(self, epoch):
@@ -464,13 +469,13 @@ class PyGTrainer:
         # Save checkpoint
         checkpoint_path = self.results_folder / f"model-{epoch}.pt"
         torch.save(data, str(checkpoint_path))
-        print(f"> Saved checkpoint to {checkpoint_path}")
+        logger.info("Saved checkpoint to {}", checkpoint_path)
 
         # Overwrite 'milestone.txt' with the new milestone
         milestone_file = self.results_folder / "milestone.txt"
         with open(milestone_file, "w") as f:
             f.write(str(epoch))
-        print(f"> Updated milestone.txt to milestone {epoch}")
+        logger.info("Updated milestone.txt to milestone {}", epoch)
 
         config_path = self.results_folder / "config.txt"
         with open(config_path, "w") as f:
@@ -492,9 +497,9 @@ class PyGTrainer:
         if "pretrained_ckpt_path" in config:
             load_path = _resolve_checkpoint_candidate(config.pretrained_ckpt_path)
             if load_path is None:
-                print(
-                    f"> Checkpoint file {config.pretrained_ckpt_path} does not exist. Check the value of "
-                    f"`{config.pretrained_ckpt_path=}` for correctness.",
+                logger.warning(
+                    "Checkpoint file {} does not exist. Check `config.pretrained_ckpt_path` for correctness",
+                    config.pretrained_ckpt_path,
                 )
                 return None
 
@@ -505,7 +510,7 @@ class PyGTrainer:
         if load_path is None:
             return
 
-        print(f"> Loading pretrained model state from {load_path}")
+        logger.info("Loading pretrained model state from {}", load_path)
 
         data = torch.load(str(load_path), map_location=self.device, weights_only=False)
         model_state = extract_submodule_state_dict(data, legacy_key="model", lightning_prefix="model.")
@@ -526,7 +531,7 @@ class PyGTrainer:
         elif isinstance(data, dict):
             _, self.step = extract_epoch_and_step(data)
 
-        print(f">Finished loading pretrained params loaded from {load_path}")
+        logger.info("Finished loading pretrained params from {}", load_path)
 
     def load_checkpoint(self):
         """Load the most recent checkpoint."""
@@ -536,31 +541,31 @@ class PyGTrainer:
 
         milestone_file = self.results_folder / "milestone.txt"
         if not milestone_file.exists():
-            print("> No milestone.txt found. Starting from scratch.")
+            logger.info("No milestone.txt found. Starting from scratch")
             return 0
 
         # Read the milestone number
         with open(milestone_file) as f:
             milestone_str = f.read().strip()
             if not milestone_str.isdigit():
-                print("milestone.txt is invalid. Starting from scratch.")
+                logger.warning("milestone.txt is invalid. Starting from scratch")
                 return 0
             milestone = int(milestone_str)
 
         # Load the checkpoint
         load_path = self.results_folder / f"model-{milestone}.pt"
         if not load_path.exists():
-            print(f"> Checkpoint file {load_path} does not exist. Starting from scratch.")
+            logger.warning("Checkpoint file {} does not exist. Starting from scratch", load_path)
             return 0
 
-        print(f"> Loading checkpoint from {load_path}")
+        logger.info("Loading checkpoint from {}", load_path)
 
         data = torch.load(str(load_path), map_location=self.device, weights_only=False)
 
         self.model.load_state_dict(data["model"])
         epoch = self.load_trainer_state(data)
 
-        print(f"> Resumed from epoch {epoch + 1}, step {self.step}")
+        logger.info("Resumed from epoch {}, step {}", epoch + 1, self.step)
 
         return epoch + 1
 
@@ -583,9 +588,9 @@ class PyGTrainer:
 
         try:
             self.results_folder.mkdir(parents=True, exist_ok=False)
-            print(f"> Checkpoint directory initialized at {self.results_folder}")
+            logger.info("Checkpoint directory initialized at {}", self.results_folder)
         except FileExistsError:
-            print(f"> Checkpoint directory already exists at {self.results_folder}")
+            logger.info("Checkpoint directory already exists at {}", self.results_folder)
 
     def get_outputs_and_loss(self, inputs: Data):
         """Run batch through model.
@@ -693,7 +698,7 @@ class PyGTrainer:
         if self.run_wandb:
             wandb.log(log)
         else:
-            print(f"log = {pformat(log)}")
+            logger.info("{}", pformat(log))
 
         return log
 
@@ -744,6 +749,12 @@ class PyGTrainer:
 
         self.last_fit_reused_checkpoint = False
         self.last_fit_skipped_training = False
+
+        if not resume_from_checkpoint:
+            checkpoint_directory = self.get_checkpoint_directory()
+            if checkpoint_directory.exists():
+                logger.info("Removing existing checkpoint directory for fresh fit: {}", checkpoint_directory)
+                shutil.rmtree(checkpoint_directory)
 
         self.initialize_checkpointing()
         write_config_snapshot(self.results_folder, self.cfg)

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from loguru import logger
 from omegaconf import OmegaConf
 
 import wandb
@@ -109,14 +110,18 @@ class Benchmark:
 
     def _run_baseline(self) -> EvaluationResult:
         """Run the full-data baseline benchmark."""
+        logger.info("Baseline training/evaluation")
         return self._run_training_evaluation(
             trainer=self.trainer,
             evaluation_data=self.trainer.data,
+            stage_name="baseline",
         )
 
     def _run_sketch(self) -> SketchResult:
         """Run sketching, sketch-model training, and sketch evaluation."""
+        logger.info("Sketching dataset materialization")
         sketched_dir, sketch_metrics = self._materialize_sketched_dataset()
+        logger.info("Sketch training/evaluation")
         sketched_cfg = OmegaConf.create(OmegaConf.to_container(self.cfg, resolve=True))
         sketched_cfg.dataset.args.data_directory = str(sketched_dir)
         sketched_cfg.run_name = f"{self.cfg.run_name}_sketched"
@@ -124,6 +129,7 @@ class Benchmark:
         sketch_evaluation = self._run_training_evaluation(
             trainer=sketched_trainer,
             evaluation_data=self.trainer.data,
+            stage_name="sketch",
         )
         sketch = SketchResult(
             output_directory=str(sketched_dir),
@@ -137,8 +143,10 @@ class Benchmark:
     def _merge_sketch_agreement(self, sketch: SketchResult, sketched_trainer) -> None:
         """Add original-clustering agreement metrics to a sketch evaluation."""
         if "original_leiden" in (sketch.evaluation.metrics_by_label_key or {}):
+            logger.info("Sketch agreement already present in cached evaluation")
             return
 
+        logger.info("Sketch agreement scoring")
         sketch_agreement = evaluate_sketch_cluster_agreement(
             reference_trainer=self.trainer,
             reference_data=self.trainer.data,
@@ -188,13 +196,19 @@ class Benchmark:
 
         return eval_dir
 
-    def evaluate_embeddings(self, trainer, eval_dir: str | Path, evaluation_data=None) -> dict[str, object]:
+    def evaluate_embeddings(
+        self,
+        trainer,
+        eval_dir: str | Path,
+        evaluation_data=None,
+        stage: str = "evaluation",
+    ) -> dict[str, object]:
         """Cluster slide embeddings, score them, and write plots."""
         slide_records = extract_slide_embedding_records(
             trainer=trainer,
             evaluation_data=evaluation_data,
             label_keys=self.label_keys,
-            progress_desc="Extracting Embeddings",
+            progress_desc=f"Extracting {stage} embeddings",
         )
         if not slide_records:
             return {"label_keys": list(self.label_keys), "metrics_by_label_key": {}}
@@ -226,7 +240,7 @@ class Benchmark:
             evaluate_and_plot_slide_embeddings,
             slide_jobs,
             max_workers=max(1, self.num_workers),
-            progress_desc="Scoring Embeddings",
+            progress_desc=f"Scoring {stage} embeddings",
         ):
             accumulate_label_results(metric_store, slide_results)
 
@@ -236,31 +250,40 @@ class Benchmark:
         self,
         trainer,
         evaluation_data,
+        stage_name: str,
     ) -> EvaluationResult:
         """Run training evaluation on a particular data object."""
         eval_dir = self.get_eval_dir(trainer.cfg)
 
         output_path = eval_dir / "evaluation.json"
         if output_path.exists():
-            with open(output_path) as f:
-                return EvaluationResult.from_dict(json.load(f))
+            if not self.resume_from_checkpoint:
+                logger.info("{} evaluation cache ignored for fresh run at {}", stage_name.capitalize(), output_path)
+            else:
+                logger.info("{} cache hit at {}", stage_name.capitalize(), output_path)
+                with open(output_path) as f:
+                    return EvaluationResult.from_dict(json.load(f))
 
+        logger.info("{} dataloader/model warmup", stage_name.capitalize())
         trainer.warmup_dataloaders()
         if trainer.device.startswith("cuda") and torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.synchronize()
 
-        # Benchmarking timing
+        logger.info("{} model fitting", stage_name.capitalize())
         start_time = time.perf_counter()
         trainer.fit(resume_from_checkpoint=self.resume_from_checkpoint)
         training_time_seconds = time.perf_counter() - start_time
         reused_checkpoint = bool(getattr(trainer, "last_fit_reused_checkpoint", False))
 
+        logger.info("{} loss extraction and embedding evaluation", stage_name.capitalize())
         losses = extract_loss_metrics(trainer)
+        logger.info("{} embedding scoring using {} clustering", stage_name.capitalize(), self.clustering_backend)
         ari_metrics = self.evaluate_embeddings(
             trainer=trainer,
             evaluation_data=evaluation_data,
             eval_dir=eval_dir,
+            stage=stage_name,
         )
 
         metrics = EvaluationResult(
@@ -292,6 +315,7 @@ class Benchmark:
         with open(output_path, "w") as f:
             json.dump(serialize_dataclass(metrics), f, indent=2)
 
+        logger.info("{} evaluation saved to {}", stage_name.capitalize(), output_path)
         return metrics
 
     def _materialize_sketched_dataset(self) -> tuple[Path, dict[str, Any]]:
@@ -306,11 +330,13 @@ class Benchmark:
         output_dir.mkdir(parents=True, exist_ok=True)
         metadata_path = output_dir / "sketch_metadata.json"
         if metadata_path.exists():
+            logger.info("Sketch dataset cache hit at {}", metadata_path)
             with open(metadata_path) as f:
                 return output_dir, json.load(f)
 
         sketcher = instantiate_from_config(self.cfg.sketcher)
         input_paths = sorted(input_dir.glob("*.h5ad"))
+        logger.info("Sketching {} input slides into {}", len(input_paths), output_dir)
 
         total_sketch_time_seconds = 0.0
         total_original_num_cells = 0
@@ -346,6 +372,7 @@ class Benchmark:
         }
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)
+        logger.info("Sketch metadata saved to {}", metadata_path)
         return output_dir, metadata
 
     def _start_wandb_run(self):
@@ -405,9 +432,15 @@ class Benchmark:
 
     def run(self) -> dict[str, Any]:
         """Run the configured benchmark and return the final summary."""
+        logger.info("Benchmark start for run {}", self.cfg.run_name)
         wandb_run = self._start_wandb_run()
         try:
             dataset = DatasetSummary(name=self.cfg.dataset.name, data_directory=self.cfg.dataset.args.data_directory)
+            logger.info(
+                "Dataset summary: {} slides, {} cells",
+                dataset.num_slides,
+                dataset.num_cells,
+            )
             baseline = self._run_baseline()
             summary = {
                 "dataset": serialize_dataclass(dataset),
@@ -418,6 +451,7 @@ class Benchmark:
                 summary["sketch"] = serialize_dataclass(self._run_sketch())
 
             self._finalize_wandb_run(wandb_run, summary)
+            logger.info("Benchmark complete for run {}", self.cfg.run_name)
             return summary
         except Exception:
             if wandb_run is not None:

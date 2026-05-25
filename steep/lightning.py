@@ -11,6 +11,7 @@ import torch
 from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.callbacks.progress import TQDMProgressBar
 from lightning.pytorch.loggers import WandbLogger
+from loguru import logger
 from omegaconf import OmegaConf
 from tqdm.utils import _screen_shape_wrapper
 
@@ -97,6 +98,7 @@ def finalize_lightning_logger(logger, status: str = "success") -> None:
 
 
 def cleanup_distributed() -> None:
+    suppress_deepspeed_probe_logging()
     deepspeed_comm = None
     deepspeed_groups = None
     try:
@@ -156,6 +158,14 @@ def suppress_deepspeed_probe_logging() -> None:
     root_logger = logging.getLogger()
     if root_logger.level in (logging.NOTSET, logging.DEBUG, logging.INFO):
         root_logger.setLevel(logging.WARNING)
+    for logger_name in (
+        "deepspeed",
+        "deepspeed.ops",
+        "deepspeed.ops.op_builder",
+        "triton",
+        "lightning.pytorch",
+    ):
+        logging.getLogger(logger_name).setLevel(logging.ERROR)
 
 
 class _DynamicWidthTQDMProgressBar(TQDMProgressBar):
@@ -269,8 +279,8 @@ def restore_rng_state(checkpoint: dict[str, Any], rng: torch.Generator | None = 
 
     num_visible_devices = torch.cuda.device_count()
     if len(cuda_rng_state_all) != num_visible_devices:
-        print(
-            "Warning: Number of visible CUDA devices does not match the number of saved CUDA RNG states. "
+        logger.warning(
+            "Number of visible CUDA devices does not match the number of saved CUDA RNG states. "
             "Skipping CUDA RNG state restoration.",
         )
         return
