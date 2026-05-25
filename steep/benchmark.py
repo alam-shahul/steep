@@ -4,24 +4,30 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import anndata as ad
+import numpy as np
 import torch
+import wandb
 from omegaconf import OmegaConf
 
-import wandb
 from steep.trainer import setup_trainer
 from steep.utils import (
+    ClassificationLabelStore,
     DatasetSummary,
     LabelMetricStore,
+    accumulate_classification_results,
     accumulate_label_results,
     compute_peak_gpu_memory,
     evaluate_and_plot_slide_embeddings,
     evaluate_sketch_cluster_agreement,
+    evaluate_slide_classification,
     extract_loss_metrics,
     extract_slide_embedding_records,
     get_fully_qualified_cache_paths,
     instantiate_from_config,
     iter_evaluation_results,
     serialize_dataclass,
+    summarize_classification_scores,
     summarize_cluster_scores,
 )
 
@@ -39,6 +45,7 @@ class EvaluationResult:
     test_loss: float | None = None
     label_keys: list[str] | None = None
     metrics_by_label_key: dict[str, Any] | None = None
+    classification_metrics_by_label_key: dict[str, Any] | None = None
     training_time_seconds: float | None = None
     peak_gpu_memory_bytes: int | None = None
     epoch_times_seconds: list[float] | None = None
@@ -51,6 +58,8 @@ class EvaluationResult:
         data = dict(data)
         if "metrics_by_label_key" not in data and "ari_by_label_key" in data:
             data["metrics_by_label_key"] = data.pop("ari_by_label_key")
+        valid_keys = set(cls.__dataclass_fields__.keys())
+        data = {k: v for k, v in data.items() if k in valid_keys}
         return cls(**data)
 
 
@@ -94,6 +103,8 @@ class Benchmark:
         leiden_resolution: float = 1.0,
         resume_from_checkpoint: bool = True,
         run_wandb: bool = False,
+        classification_train_ratio: float = 0.1,
+        classification_max_iter: int = 1000,
     ):
         self.cfg = cfg
         self.trainer = trainer
@@ -104,12 +115,15 @@ class Benchmark:
         self.leiden_resolution = float(leiden_resolution)
         self.resume_from_checkpoint = bool(resume_from_checkpoint)
         self.run_wandb = bool(run_wandb)
+        self.classification_train_ratio = float(classification_train_ratio)
+        self.classification_max_iter = int(classification_max_iter)
 
     def _run_baseline(self) -> EvaluationResult:
         """Run the full-data baseline benchmark."""
         return self._run_training_evaluation(
             trainer=self.trainer,
             evaluation_data=self.trainer.data,
+            sketched_data_directory=None,
         )
 
     def _run_sketch(self) -> SketchResult:
@@ -122,6 +136,7 @@ class Benchmark:
         sketch_evaluation = self._run_training_evaluation(
             trainer=sketched_trainer,
             evaluation_data=self.trainer.data,
+            sketched_data_directory=sketched_dir,
         )
         sketch = SketchResult(
             output_directory=str(sketched_dir),
@@ -175,8 +190,63 @@ class Benchmark:
 
         return eval_dir
 
-    def evaluate_embeddings(self, trainer, eval_dir: str | Path, evaluation_data=None) -> dict[str, object]:
-        """Cluster slide embeddings, score them, and write plots."""
+    def _build_train_masks(
+        self,
+        slide_records,
+        sketched_data_directory: str | Path | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Build per-slide boolean train masks for classification eval.
+
+        - If sketched_data_directory is given: train = cells whose obs_names are in the
+          corresponding sketched h5ad.
+        - Otherwise (baseline): train = random subsample with the same retention_ratio
+          as the cfg.sketcher or self.classification_train_ratio.
+
+        """
+        train_masks: dict[str, np.ndarray] = {}
+
+        if sketched_data_directory is not None:
+            sketched_dir = Path(sketched_data_directory)
+            for record in slide_records:
+                sketched_path = sketched_dir / record.slide_name
+                if not sketched_path.exists():
+                    train_masks[record.slide_name] = None
+                    continue
+                sketched_adata = ad.read_h5ad(sketched_path, backed="r")
+                sketched_obs_names = set(sketched_adata.obs_names.to_numpy().tolist())
+                sketched_adata.file.close()
+                train_masks[record.slide_name] = np.isin(record.obs_names, list(sketched_obs_names))
+        else:
+            retention_ratio = OmegaConf.select(
+                self.cfg,
+                "sketcher.args.retention_ratio",
+                default=self.classification_train_ratio,
+            )
+            retention_ratio = float(retention_ratio)
+            rng = np.random.default_rng(self.random_seed)
+            for record in slide_records:
+                n = len(record.obs_names)
+                if n == 0:
+                    train_masks[record.slide_name] = np.zeros(0, dtype=bool)
+                    continue
+                n_train = max(1, int(np.ceil(n * retention_ratio)))
+                n_train = min(n_train, n)
+                indices = rng.choice(n, size=n_train, replace=False)
+                mask = np.zeros(n, dtype=bool)
+                mask[indices] = True
+                train_masks[record.slide_name] = mask
+
+        return train_masks
+
+    def evaluate_embeddings(
+        self,
+        trainer,
+        eval_dir: str | Path,
+        evaluation_data=None,
+        sketched_data_directory: str | Path | None = None,
+    ) -> dict[str, object]:
+        """Cluster slide embeddings, score them, classify cell types, write
+        plots."""
         slide_records = extract_slide_embedding_records(
             trainer=trainer,
             evaluation_data=evaluation_data,
@@ -184,8 +254,13 @@ class Benchmark:
             progress_desc="Extracting Embeddings",
         )
         if not slide_records:
-            return {"label_keys": list(self.label_keys), "metrics_by_label_key": {}}
+            return {
+                "label_keys": list(self.label_keys),
+                "metrics_by_label_key": {},
+                "classification_metrics_by_label_key": {},
+            }
 
+        # === Clustering eval ===
         metric_store = {label_key: LabelMetricStore() for label_key in self.label_keys}
         slide_jobs = []
         plot_dir = Path(eval_dir / "plots")
@@ -216,12 +291,48 @@ class Benchmark:
         ):
             accumulate_label_results(metric_store, slide_results)
 
-        return summarize_cluster_scores(self.label_keys, metric_store)
+        clustering_summary = summarize_cluster_scores(self.label_keys, metric_store)
+
+        # === Classification eval ===
+        train_masks = self._build_train_masks(slide_records, sketched_data_directory)
+
+        classif_jobs = []
+        for slide_record in slide_records:
+            train_mask = train_masks.get(slide_record.slide_name)
+            if train_mask is None or train_mask.sum() < 2:
+                continue
+            classif_jobs.append(
+                {
+                    "labels_by_key": slide_record.labels_by_key,
+                    "embeddings": slide_record.embeddings,
+                    "train_mask": train_mask,
+                    "random_seed": self.random_seed,
+                    "max_iter": self.classification_max_iter,
+                },
+            )
+
+        classif_store = {label_key: ClassificationLabelStore() for label_key in self.label_keys}
+        if classif_jobs:
+            for slide_results in iter_evaluation_results(
+                evaluate_slide_classification,
+                classif_jobs,
+                max_workers=max(1, self.num_workers),
+                progress_desc="Scoring Classification",
+            ):
+                accumulate_classification_results(classif_store, slide_results)
+
+        classif_summary = summarize_classification_scores(self.label_keys, classif_store)
+
+        return {
+            **clustering_summary,
+            **classif_summary,
+        }
 
     def _run_training_evaluation(
         self,
         trainer,
         evaluation_data,
+        sketched_data_directory: str | Path | None = None,
     ) -> EvaluationResult:
         """Run training evaluation on a particular data object."""
         eval_dir = self.get_eval_dir(trainer.cfg)
@@ -229,7 +340,30 @@ class Benchmark:
         output_path = eval_dir / "evaluation.json"
         if output_path.exists():
             with open(output_path) as f:
-                return EvaluationResult.from_dict(json.load(f))
+                cached = EvaluationResult.from_dict(json.load(f))
+
+            if cached.classification_metrics_by_label_key is None:
+                print(f"> Cached evaluation missing classification metrics; backfilling from checkpoint.")
+                trainer.warmup_dataloaders()
+                trainer.fit(resume_from_checkpoint=self.resume_from_checkpoint)
+                eval_metrics = self.evaluate_embeddings(
+                    trainer=trainer,
+                    evaluation_data=evaluation_data,
+                    eval_dir=eval_dir,
+                    sketched_data_directory=sketched_data_directory,
+                )
+
+                if cached.metrics_by_label_key is None:
+                    cached.metrics_by_label_key = eval_metrics.get("metrics_by_label_key", {})
+                if cached.label_keys is None:
+                    cached.label_keys = eval_metrics.get("label_keys", list(self.label_keys))
+                cached.classification_metrics_by_label_key = eval_metrics.get(
+                    "classification_metrics_by_label_key",
+                    {},
+                )
+                with open(output_path, "w") as f:
+                    json.dump(serialize_dataclass(cached), f, indent=2)
+            return cached
 
         trainer.warmup_dataloaders()
         if trainer.device.startswith("cuda") and torch.cuda.is_available():
@@ -243,10 +377,11 @@ class Benchmark:
         reused_checkpoint = bool(getattr(trainer, "last_fit_reused_checkpoint", False))
 
         losses = extract_loss_metrics(trainer)
-        ari_metrics = self.evaluate_embeddings(
+        eval_metrics = self.evaluate_embeddings(
             trainer=trainer,
             evaluation_data=evaluation_data,
             eval_dir=eval_dir,
+            sketched_data_directory=sketched_data_directory,
         )
 
         metrics = EvaluationResult(
@@ -255,7 +390,7 @@ class Benchmark:
             evaluation_directory=str(eval_dir),
             evaluation_json=str(output_path),
             **losses,
-            **ari_metrics,
+            **eval_metrics,
         )
         if not reused_checkpoint:
             metrics.training_time_seconds = training_time_seconds
