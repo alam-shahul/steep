@@ -13,6 +13,7 @@ authors = [
 dependencies = [  # TODO: check which are necessary
     "packaging",
     "hydra-core",
+    "loguru",
     "omegaconf",
     "wandb",
     "tqdm",
