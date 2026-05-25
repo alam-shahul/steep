@@ -7,6 +7,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+from loguru import logger
 from omegaconf import OmegaConf
 
 
@@ -185,7 +186,7 @@ def write_plot(rows: list[dict[str, Any]], output_path: Path, label_key: str) ->
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, 3, figsize=(10, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     _plot_metric_panel(
         axes[0],
         nmi_scores,
@@ -205,7 +206,6 @@ def write_plot(rows: list[dict[str, Any]], output_path: Path, label_key: str) ->
         title="Retention Ratio vs Total Epoch Runtime",
     )
     axes[0].legend()
-    fig.subplots_adjust(wspace=0.25)
     plt.tight_layout()
     plt.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -315,13 +315,13 @@ def main() -> None:
         raise FileNotFoundError(f"No benchmark evaluation JSON files found under {args.input_dir}.")
 
     write_csv(rows, args.output_path)
-    print(f"Wrote {len(rows)} rows to {args.output_path}")
+    logger.info("Wrote {} rows to {}", len(rows), args.output_path)
     plot_path = args.plot_path or args.output_path.with_suffix(".png")
     write_plot(rows, plot_path, label_key=args.label_key)
-    print(f"Wrote plot to {plot_path}")
+    logger.info("Wrote plot to {}", plot_path)
     gallery_path = args.gallery_path or args.output_path.with_name(f"{args.output_path.stem}_gallery.png")
     write_gallery_plot(rows, gallery_path, seed=args.gallery_seed)
-    print(f"Wrote gallery plot to {gallery_path}")
+    logger.info("Wrote gallery plot to {}", gallery_path)
 
 
 if __name__ == "__main__":

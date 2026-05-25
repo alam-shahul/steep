@@ -10,6 +10,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+from loguru import logger
 
 DEFAULT_RECORDS_DIR = Path("/work/magroup/xinyuelu/steep/experiments/zhuang_subset/records")
 DEFAULT_EVAL_ROOT = Path("/work/magroup/shared/steep/evaluations")
@@ -320,7 +321,7 @@ def build_row_from_log(
 
     ratio_seed = parse_ratio_seed_from_log_name(log_path)
     if ratio_seed is None:
-        print(f"Skipping {log_path}: cannot parse retention ratio / seed from log name.")
+        logger.warning("Skipping {}: cannot parse retention ratio / seed from log name", log_path)
         return None
 
     retention_ratio, random_seed = ratio_seed
@@ -334,12 +335,12 @@ def build_row_from_log(
             checkpoint_id = fallback_checkpoint_id
 
     if eval_json is None:
-        print(f"Skipping {log_path}: neither evaluation_json nor checkpoint id found in log.")
+        logger.warning("Skipping {}: neither evaluation_json nor checkpoint id found in log", log_path)
         return None
 
     evaluation = load_evaluation_json(eval_json)
     if evaluation is None:
-        print(f"Skipping {log_path}: evaluation.json not found or invalid at {eval_json}.")
+        logger.warning("Skipping {}: evaluation.json not found or invalid at {}", log_path, eval_json)
         return None
 
     short_name = short_method_name_from_folder(method_name)
@@ -629,13 +630,13 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
         ratio = float(row["sketcher.args.retention_ratio"])
         counter[group][method][ratio] += 1
 
-    print("\nCollected runs:")
+    logger.info("Collected runs:")
 
     for group in ["edge", "node"]:
         if group not in counter:
             continue
 
-        print(f"\n[{group}]")
+        logger.info("[{}]", group)
         order = group_method_order(group)
 
         for method in sorted(
@@ -643,7 +644,7 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
             key=lambda x: order.index(x) if x in order else 999,
         ):
             parts = [f"r={ratio:g}: n={counter[group][method][ratio]}" for ratio in sorted(counter[group][method])]
-            print(f"  {method}: " + ", ".join(parts))
+            logger.info("{}: {}", method, ", ".join(parts))
 
 
 def main() -> None:
@@ -661,7 +662,7 @@ def main() -> None:
         )
 
     write_csv(rows, args.output_csv)
-    print(f"Wrote all rows to {args.output_csv}")
+    logger.info("Wrote all rows to {}", args.output_csv)
 
     plot_prefix = args.plot_prefix or args.output_csv.with_suffix("")
 
@@ -671,14 +672,14 @@ def main() -> None:
         group_rows = [row for row in rows if row.get("method_group") == group]
 
         if not group_rows:
-            print(f"Skipping group `{group}`: no rows.")
+            logger.warning("Skipping group `{}`: no rows", group)
             continue
 
         group_csv = plot_prefix.with_name(f"{plot_prefix.name}_{group}.csv")
         group_plot = plot_prefix.with_name(f"{plot_prefix.name}_{group}.png")
 
         write_csv(group_rows, group_csv)
-        print(f"Wrote {group} rows to {group_csv}")
+        logger.info("Wrote {} rows to {}", group, group_csv)
 
         write_plot(
             group_rows,
@@ -686,7 +687,7 @@ def main() -> None:
             label_key=args.label_key,
             group=group,
         )
-        print(f"Wrote {group} plot to {group_plot}")
+        logger.info("Wrote {} plot to {}", group, group_plot)
 
     print_summary(rows)
 
