@@ -43,7 +43,7 @@ This script:
 To aggregate benchmark outputs into a CSV:
 
 ```bash
-python scripts/summarize_benchmarks.py /work/magroup/shared/steep/evaluations /path/to/summary.csv
+python scripts/summarize.py /work/magroup/shared/steep/evaluations /path/to/summary.csv
 ```
 
 # Contribution guidelines
