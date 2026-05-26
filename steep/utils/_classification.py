@@ -173,7 +173,7 @@ def _save_confusion_matrix(
     width = max(6.0, min(18.0, 0.4 * len(classes) + 4.0))
     fig, ax = plt.subplots(figsize=(width, width))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
-    disp.plot(cmap=plt.cm.Blues, ax=ax, colorbar=True, xticks_rotation="vertical")
+    disp.plot(cmap="OrRd", ax=ax, colorbar=True, xticks_rotation="vertical")
     ax.set_title("kNN cell type classification")
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
