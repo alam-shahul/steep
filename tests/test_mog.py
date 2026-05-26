@@ -102,13 +102,15 @@ def test_mog_forward_shapes(mog_model, tiny_graph, mock_args, device):
     if mock_args.get("use_topo", False):
         mog_model.learner.get_topo_val(edge_index)
 
-    mask, add_loss = mog_model.learner(
+    mog_output = mog_model.learner(
         x=x,
         edge_index=edge_index,
         temp=1e-3,
         edge_attr=None,
         training=False,
     )
+    mask = mog_output["edge_mask"]
+    add_loss = mog_output["loss"]
 
     assert mask.dim() == 1
     assert mask.numel() == edge_index.size(1)
@@ -139,13 +141,15 @@ def test_mog_one_train_step_decreases_backward_ok(mog_model, tiny_graph, mock_ar
     if mock_args.get("use_topo", False):
         model.learner.get_topo_val(edge_index)
 
-    mask, add_loss = model.learner(
+    mog_output = model.learner(
         x=x,
         edge_index=edge_index,
         temp=1e-3,
         edge_attr=None,
         training=True,
     )
+    mask = mog_output["edge_mask"]
+    add_loss = mog_output["loss"]
     out = model.gnn(data, mask)
 
     loss = F.nll_loss(out, data.y) + add_loss * 1e-1
@@ -164,13 +168,14 @@ def test_mask_sparsity_reasonable(mog_model, tiny_graph, device):
     model.eval()
     data = tiny_graph.to(device)
 
-    mask, _ = model.learner(
+    mog_output = model.learner(
         x=data.x,
         edge_index=data.edge_index,
         temp=1e-3,
         edge_attr=None,
         training=False,
     )
+    mask = mog_output["edge_mask"]
 
     kept = int(mask.sum().item())
     total = mask.numel()
