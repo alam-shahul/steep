@@ -16,7 +16,7 @@ CLASSIFICATION_METRIC_NAMES = ("accuracy", "macro_f1", "weighted_f1")
 
 # Number of neighbors used by the kNN classifier.
 DEFAULT_N_NEIGHBORS = 5
-MAX_CONFUSION_MATRIX_CLASSES = 250
+MAX_CONFUSION_MATRIX_CLASSES = 100
 
 
 @dataclass
