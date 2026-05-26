@@ -66,13 +66,15 @@ class STAGATE_MoG(nn.Module):
         x = data.x
         edge_index = data.edge_index
         edge_attr = self._build_edge_attr(data)
-        edge_mask, mog_loss = self.learner(
+        mog_output = self.learner(
             x=x,
             edge_index=edge_index,
             temp=temp,
             edge_attr=edge_attr,
             training=self.training,
         )
+        edge_mask = mog_output["edge_mask"]
+        mog_loss = mog_output["loss"]
 
         enc_mask = edge_mask
         dec_mask = None if self.mask_encoder_only else edge_mask

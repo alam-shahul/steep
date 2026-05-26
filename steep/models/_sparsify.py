@@ -1,6 +1,5 @@
 from typing import Callable, Tuple, Union
 
-import networkit as nk
 import networkx as nx
 import numpy as np
 import torch
@@ -16,6 +15,11 @@ from torch_geometric.nn.dense.linear import Linear
 from torch_geometric.nn.inits import reset, zeros
 from torch_geometric.typing import Adj, OptPairTensor, OptTensor, Size
 from torch_geometric.utils import normalized_cut
+
+try:
+    import networkit as nk
+except ImportError:
+    nk = None
 
 
 class BinaryStep(torch.autograd.Function):
@@ -193,6 +197,10 @@ class MoE(nn.Module):
         coef=1e-2,
         edge_dim=1,
         lam=0.1,
+        topo_loss_coef=0.0,
+        expr_loss_coef=0.0,
+        expr_aug_coef=0.0,
+        expr_topo_mode="both",
     ):
         super().__init__()
         self.noisy_gating = noisy_gating
@@ -223,13 +231,25 @@ class MoE(nn.Module):
 
         # Optional topological edge scores (LocalDegree, ForestFire, etc.)
         self.topo_val = None
+        self.expr_prior = None
         self.lam = lam
+        self.topo_loss_coef = float(topo_loss_coef)
+        self.expr_loss_coef = float(expr_loss_coef)
+        self.expr_aug_coef = float(expr_aug_coef)
+        self.expr_topo_mode = expr_topo_mode
 
         self.softplus = nn.Softplus()
         self.softmax = nn.Softmax(1)
         self.register_buffer("mean", torch.tensor([0.0]))
         self.register_buffer("std", torch.tensor([1.0]))
         assert self.k <= self.num_experts
+
+    def _normalized_mse(self, values, target):
+        values = values.float()
+        target = target.to(device=values.device, dtype=values.dtype)
+        values = (values - values.min()) / (values.max() - values.min() + 1e-12)
+        target = (target - target.min()) / (target.max() - target.min() + 1e-12)
+        return F.mse_loss(values, target)
 
     def cv_squared(self, x):
         """Squared coefficient of variation, used as load-balancing loss."""
@@ -298,13 +318,16 @@ class MoE(nn.Module):
 
     def forward(self, x, edge_index, temp, edge_attr=None, training=False):
         """Compute per-edge sparsification mask and MoE load-balancing loss."""
+        if edge_attr is not None and edge_attr.dim() == 1:
+            edge_attr = edge_attr.view(-1, 1)
+
         # Node-level expert gates: [num_nodes, num_experts]
         node_gates, load = self.noisy_top_k_gating(x, edge_index, self.training)
 
         # Load-balancing loss: encourage uniform usage over experts
         importance = node_gates.sum(0)
-        loss = self.cv_squared(importance) + self.cv_squared(load)
-        loss *= self.loss_coef
+        loss_balance = self.cv_squared(importance) + self.cv_squared(load)
+        loss_balance *= self.loss_coef
         self.importance = node_gates.mean(0)
         self.load = load
 
@@ -365,10 +388,32 @@ class MoE(nn.Module):
         self.k_edges_per_node = k_edges_per_node
         self.k_per_node = k_per_node
 
-        return mask, loss
+        zero = gated_output.new_tensor(0.0)
+        loss_topo = zero
+        if self.topo_val is not None and self.topo_loss_coef > 0 and self.expr_topo_mode in {"both", "topo"}:
+            topo_prior = self.topo_val.mean(dim=1)
+            loss_topo = self._normalized_mse(gated_output, topo_prior) * self.topo_loss_coef
+
+        loss_expr = zero
+        if self.expr_prior is not None and self.expr_loss_coef > 0 and self.expr_topo_mode in {"both", "expr"}:
+            loss_expr = self._normalized_mse(gated_output, self.expr_prior) * self.expr_loss_coef
+
+        loss = loss_balance + loss_topo + loss_expr
+
+        return {
+            "edge_score": gated_output,
+            "edge_mask": mask,
+            "loss": loss,
+            "loss_balance": loss_balance,
+            "loss_topo": loss_topo,
+            "loss_expr": loss_expr,
+        }
 
     def get_topo_val(self, edge_index):
         """Compute 4 networkit-based topological scores for each edge."""
+        if nk is None:
+            raise ImportError("MoG topology scores require networkit. Install networkit or set use_topo=false.")
+
         G = nx.DiGraph()
         edges = edge_index.t().tolist()
         G.add_edges_from(edges)
@@ -393,24 +438,75 @@ class MoE(nn.Module):
 #   - Net is the downstream GNN
 # -------------------------------------------------
 class MoG(nn.Module):
-    def __init__(self, in_dim, emb_dim, out_channels, edge_dim, args, device, params=None):
+    def __init__(
+        self,
+        num_features=None,
+        device=None,
+        k_list=None,
+        hidden_spl=None,
+        num_layers_spl=None,
+        expert_select=None,
+        lam=1.0,
+        topo_loss_coef=0.0,
+        expr_loss_coef=0.0,
+        retention_ratio=None,
+        expr_aug_coef=0.0,
+        expr_topo_mode="both",
+        in_dim=None,
+        emb_dim=None,
+        out_channels=None,
+        edge_dim=1,
+        args=None,
+        params=None,
+    ):
         super().__init__()
-        self.args = args
+
+        if args is not None:
+            model_args = dict(args)
+            num_features = in_dim if in_dim is not None else num_features
+        else:
+            model_args = {
+                "k_list": k_list,
+                "hidden_spl": hidden_spl,
+                "num_layers_spl": num_layers_spl,
+                "expert_select": expert_select,
+                "lam": lam,
+                "topo_loss_coef": topo_loss_coef,
+                "expr_loss_coef": expr_loss_coef,
+                "retention_ratio": retention_ratio,
+                "expr_aug_coef": expr_aug_coef,
+                "expr_topo_mode": expr_topo_mode,
+            }
+
+        in_dim = num_features if num_features is not None else in_dim
+        emb_dim = emb_dim if emb_dim is not None else model_args["hidden_spl"]
+        out_channels = out_channels if out_channels is not None else in_dim
+        model_args.setdefault("lam", 1.0)
+        model_args.setdefault("topo_loss_coef", 0.0)
+        model_args.setdefault("expr_loss_coef", 0.0)
+        model_args.setdefault("expr_aug_coef", 0.0)
+        model_args.setdefault("expr_topo_mode", "both")
+
+        self.args = model_args
         self.device = device
-        self.k_list = torch.tensor(args["k_list"], device=device)
+        self.k_list = torch.tensor(model_args["k_list"], device=device)
 
         # MoE-based sparsification learner
         self.learner = MoE(
             in_dim=in_dim,
             emb_dim=emb_dim,
-            hidden_size=args["hidden_spl"],
+            hidden_size=model_args["hidden_spl"],
             num_experts=self.k_list.size(0),
-            nlayers=args["num_layers_spl"],
+            nlayers=model_args["num_layers_spl"],
             activation=nn.ReLU(),
             k_list=self.k_list,
-            expert_select=args["expert_select"],
+            expert_select=model_args["expert_select"],
             edge_dim=edge_dim,
-            lam=args["lam"],
+            lam=model_args["lam"],
+            topo_loss_coef=model_args.get("topo_loss_coef", 0.0),
+            expr_loss_coef=model_args.get("expr_loss_coef", 0.0),
+            expr_aug_coef=model_args.get("expr_aug_coef", 0.0),
+            expr_topo_mode=model_args.get("expr_topo_mode", "both"),
         )
 
         # Task GNN (NNConv + pooling)
