@@ -1,4 +1,5 @@
 import json
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,10 +35,6 @@ from steep.utils import (
 class EvaluationResult:
     """Cached evaluation outputs for a trained model."""
 
-    run_name: str
-    results_folder: str
-    evaluation_directory: str
-    evaluation_json: str
     train_loss: float | None = None
     val_loss: float | None = None
     test_loss: float | None = None
@@ -54,8 +51,6 @@ class EvaluationResult:
     def from_dict(cls, data: dict[str, Any]) -> "EvaluationResult":
         """Rebuild an evaluation result from cached JSON data."""
         data = dict(data)
-        if "metrics_by_label_key" not in data and "ari_by_label_key" in data:
-            data["metrics_by_label_key"] = data.pop("ari_by_label_key")
         valid_keys = set(cls.__dataclass_fields__.keys())
         data = {k: v for k, v in data.items() if k in valid_keys}
         return cls(**data)
@@ -76,15 +71,6 @@ class SketchResult:
     sketch_time_seconds: float
     output_directory: str | None = None
     evaluation: EvaluationResult | None = None
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SketchResult":
-        """Rebuild a sketch result from cached JSON data."""
-        data = dict(data)
-        evaluation = data.get("evaluation")
-        if evaluation is not None:
-            data["evaluation"] = EvaluationResult.from_dict(evaluation)
-        return cls(**data)
 
 
 class Benchmark:
@@ -120,6 +106,24 @@ class Benchmark:
         self.classification_train_ratio = float(classification_train_ratio)
         self.classification_max_iter = int(classification_max_iter)
 
+    def _write_evaluation_config(
+        self,
+        eval_dir: Path,
+        trainer_cfg,
+        stage_name: str,
+    ) -> Path:
+        config_path = eval_dir / "config.json"
+        config = {
+            "condition": stage_name,
+            "input_config": OmegaConf.to_container(self.cfg, resolve=True),
+            "run_config": OmegaConf.to_container(trainer_cfg, resolve=True),
+        }
+
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=2)
+
+        return config_path
+
     def _run_baseline(self) -> EvaluationResult:
         """Run the full-data baseline benchmark."""
         logger.info("Baseline training/evaluation")
@@ -131,7 +135,7 @@ class Benchmark:
             resume_from_checkpoint=True,
         )
 
-    def _run_sketch(self) -> SketchResult:
+    def _run_sketch(self) -> tuple[SketchResult, Path]:
         """Run sketching, sketch-model training, and sketch evaluation."""
         logger.info("Sketching dataset materialization")
         sketched_dir, sketch_metrics = self._materialize_sketched_dataset()
@@ -147,16 +151,26 @@ class Benchmark:
             sketched_data_directory=sketched_dir,
             resume_from_checkpoint=self.resume_from_checkpoint,
         )
+        sketch_eval_dir = self.get_eval_dir(sketched_trainer.cfg)
         sketch = SketchResult(
             output_directory=str(sketched_dir),
             evaluation=sketch_evaluation,
             **sketch_metrics,
         )
-        self._merge_sketch_agreement(sketch, sketched_trainer)
+        self._merge_sketch_agreement(
+            sketch=sketch,
+            sketched_trainer=sketched_trainer,
+            evaluation_json=sketch_eval_dir / "evaluation.json",
+        )
 
-        return sketch
+        return sketch, sketch_eval_dir
 
-    def _merge_sketch_agreement(self, sketch: SketchResult, sketched_trainer) -> None:
+    def _merge_sketch_agreement(
+        self,
+        sketch: SketchResult,
+        sketched_trainer,
+        evaluation_json: Path,
+    ) -> None:
         """Add original-clustering agreement metrics to a sketch evaluation."""
         if "original_leiden" in (sketch.evaluation.metrics_by_label_key or {}):
             logger.info("Sketch agreement already present in cached evaluation")
@@ -185,7 +199,7 @@ class Benchmark:
         if sketch.evaluation.metrics_by_label_key is None:
             sketch.evaluation.metrics_by_label_key = {}
         sketch.evaluation.metrics_by_label_key.update(sketch_agreement["metrics_by_label_key"])
-        with open(sketch.evaluation.evaluation_json, "w") as f:
+        with open(evaluation_json, "w") as f:
             json.dump(serialize_dataclass(sketch.evaluation), f, indent=2)
 
     def get_eval_dir(self, trainer_cfg) -> Path:
@@ -370,6 +384,11 @@ class Benchmark:
     ) -> EvaluationResult:
         """Run training evaluation on a particular data object."""
         eval_dir = self.get_eval_dir(trainer.cfg)
+        config_path = self._write_evaluation_config(
+            eval_dir=eval_dir,
+            trainer_cfg=trainer.cfg,
+            stage_name=stage_name,
+        )
 
         output_path = eval_dir / "evaluation.json"
         if output_path.exists():
@@ -405,6 +424,7 @@ class Benchmark:
                     )
                     with open(output_path, "w") as f:
                         json.dump(serialize_dataclass(cached), f, indent=2)
+                logger.info("{} config saved to {}", stage_name.capitalize(), config_path)
                 return cached
 
         logger.info("{} dataloader/model warmup", stage_name.capitalize())
@@ -431,10 +451,6 @@ class Benchmark:
         )
 
         metrics = EvaluationResult(
-            run_name=trainer.cfg.run_name,
-            results_folder=str(trainer.results_folder),
-            evaluation_directory=str(eval_dir),
-            evaluation_json=str(output_path),
             **losses,
             **eval_metrics,
         )
@@ -460,6 +476,7 @@ class Benchmark:
             json.dump(serialize_dataclass(metrics), f, indent=2)
 
         logger.info("{} evaluation saved to {}", stage_name.capitalize(), output_path)
+        logger.info("{} config saved to {}", stage_name.capitalize(), config_path)
         return metrics
 
     def _materialize_sketched_dataset(self) -> tuple[Path, dict[str, Any]]:
@@ -471,14 +488,21 @@ class Benchmark:
             Path(self.cfg.cache_dir) / "sketches",
             keys=("dataset.args.data_directory", "sketcher"),
         )
+        if not self.resume_from_checkpoint and output_dir.exists():
+            logger.info("Sketch dataset cache ignored for fresh run at {}", output_dir)
+            shutil.rmtree(output_dir)
+
         output_dir.mkdir(parents=True, exist_ok=True)
         metadata_path = output_dir / "sketch_metadata.json"
-        if metadata_path.exists():
+        if self.resume_from_checkpoint and metadata_path.exists():
             logger.info("Sketch dataset cache hit at {}", metadata_path)
             with open(metadata_path) as f:
                 return output_dir, json.load(f)
 
         sketcher = instantiate_from_config(self.cfg.sketcher)
+        if not self.resume_from_checkpoint and hasattr(sketcher, "cache_scores"):
+            logger.info("Sketcher score cache disabled for fresh run")
+            sketcher.cache_scores = False
         input_paths = sorted(input_dir.glob("*.h5ad"))
         logger.info("Sketching {} input slides into {}", len(input_paths), output_dir)
 
@@ -490,8 +514,14 @@ class Benchmark:
         total_original_disk_bytes = 0
         total_sketched_disk_bytes = 0
 
-        for input_path in input_paths:
+        for slide_index, input_path in enumerate(input_paths, start=1):
             output_path = output_dir / input_path.name
+            logger.info(
+                "Sketching slide {}/{} ({})",
+                slide_index,
+                len(input_paths),
+                input_path.name,
+            )
             metadata = sketcher.fit_transform_to_disk(input_path, output_path)
             total_sketch_time_seconds += float(metadata.sketch_time_seconds or 0.0)
             total_original_num_cells += metadata.original_num_cells
@@ -500,6 +530,16 @@ class Benchmark:
             total_sketched_num_edges += int(metadata.sketched_num_edges or 0)
             total_original_disk_bytes += int(metadata.original_disk_bytes or 0)
             total_sketched_disk_bytes += int(metadata.sketched_disk_bytes or 0)
+            logger.info(
+                "Sketch slide {}/{} complete (cells {} -> {}, edges {} -> {}, {:.2f}s)",
+                slide_index,
+                len(input_paths),
+                metadata.original_num_cells,
+                metadata.sketched_num_cells,
+                metadata.original_num_edges,
+                metadata.sketched_num_edges,
+                float(metadata.sketch_time_seconds or 0.0),
+            )
 
         compression_ratio = total_sketched_num_cells / total_original_num_cells if total_original_num_cells > 0 else 0.0
 
@@ -548,10 +588,10 @@ class Benchmark:
         run.log(flattened)
         run.summary.update(flattened)
         artifact_dirs = []
-        baseline_eval_dir = summary.get("baseline", {}).get("evaluation_directory")
+        baseline_eval_dir = summary.get("baseline", {}).get("artifacts", {}).get("evaluation_directory")
         if baseline_eval_dir:
             artifact_dirs.append(Path(baseline_eval_dir))
-        sketch_eval_dir = summary.get("sketch", {}).get("evaluation", {}).get("evaluation_directory")
+        sketch_eval_dir = summary.get("sketch", {}).get("artifacts", {}).get("evaluation_directory")
         if sketch_eval_dir:
             artifact_dirs.append(Path(sketch_eval_dir))
 
@@ -600,13 +640,31 @@ class Benchmark:
                 dataset.num_cells,
             )
             baseline = self._run_baseline()
+            baseline_eval_dir = self.get_eval_dir(self.trainer.cfg)
             summary = {
                 "dataset": serialize_dataclass(dataset),
-                "baseline": serialize_dataclass(baseline),
+                "baseline": {
+                    "evaluation": serialize_dataclass(baseline),
+                    "artifacts": {
+                        "evaluation_directory": str(baseline_eval_dir),
+                        "evaluation_json": str(baseline_eval_dir / "evaluation.json"),
+                    },
+                },
             }
 
             if "sketcher" in self.cfg:
-                summary["sketch"] = serialize_dataclass(self._run_sketch())
+                sketch, sketch_eval_dir = self._run_sketch()
+                sketch_summary = serialize_dataclass(sketch)
+                sketch_evaluation = sketch_summary.pop("evaluation", {})
+                summary["sketch"] = {
+                    "metadata": sketch_summary,
+                    "evaluation": sketch_evaluation,
+                    "artifacts": {
+                        "sketched_data_directory": sketch.output_directory,
+                        "evaluation_directory": str(sketch_eval_dir),
+                        "evaluation_json": str(sketch_eval_dir / "evaluation.json"),
+                    },
+                }
 
             self._finalize_wandb_run(wandb_run, summary)
             logger.info("Benchmark complete for run {}", self.cfg.run_name)

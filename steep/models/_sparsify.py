@@ -353,6 +353,7 @@ class MoE(nn.Module):
         # Per-node top-k edges based on mixture scores
         node_idx, num_edges_per_node = edge_index[0].unique(return_counts=True)
         k_per_node = torch.sum(node_gates * torch.unsqueeze(self.k_list, 0), dim=1)
+        k_per_node = k_per_node.index_select(dim=0, index=node_idx)
         k_edges_per_node = (k_per_node * num_edges_per_node).round().long()
         k_edges_per_node = torch.where(
             k_edges_per_node > 0,

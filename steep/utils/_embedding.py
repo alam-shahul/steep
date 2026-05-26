@@ -3,6 +3,7 @@ from pathlib import Path
 
 import anndata as ad
 import numpy as np
+import pandas as pd
 import torch
 from tqdm import tqdm
 
@@ -14,6 +15,53 @@ class SlideEmbeddingRecord:
     spatial: np.ndarray | None
     embeddings: np.ndarray
     labels_by_key: dict[str, np.ndarray]
+
+
+COARSE_CELL_TYPE_LABEL_KEY = "cell_type_coarse"
+COARSE_CELL_TYPE_SOURCE_COLUMN = "class"
+COARSE_CELL_TYPE_PATTERNS = {
+    "Excitatory neuron": ("glut", "excit"),
+    "Inhibitory neuron": ("gaba", "inhib"),
+    "Astrocyte": ("astro",),
+    "OPC": ("opc",),
+    "Oligodendrocyte": ("oligo",),
+    "Microglia": ("micro",),
+    "Endothelial": ("endo",),
+    "Pericyte": ("peri",),
+    "Ependymal": ("ependy",),
+    "Immune": ("b cell", "t cell", "immune", "macrophage"),
+}
+
+
+def _derive_coarse_cell_type_labels(adata: ad.AnnData) -> np.ndarray | None:
+    if COARSE_CELL_TYPE_SOURCE_COLUMN not in adata.obs:
+        return None
+
+    labels = []
+    for value in adata.obs[COARSE_CELL_TYPE_SOURCE_COLUMN]:
+        values = [] if pd.isna(value) else [str(value)]
+        matched_label = "Other"
+
+        for coarse_label, patterns in COARSE_CELL_TYPE_PATTERNS.items():
+            if any(pattern in value.lower() for value in values for pattern in patterns):
+                matched_label = coarse_label
+                break
+
+        labels.append(matched_label)
+
+    return np.asarray(labels, dtype=object)
+
+
+def _extract_labels_by_key(adata: ad.AnnData, label_keys: list[str] | tuple[str, ...]) -> dict[str, np.ndarray]:
+    labels_by_key = {}
+    for label_key in label_keys:
+        if label_key in adata.obs:
+            labels_by_key[label_key] = adata.obs[label_key].to_numpy()
+        elif label_key == COARSE_CELL_TYPE_LABEL_KEY:
+            derived_labels = _derive_coarse_cell_type_labels(adata)
+            if derived_labels is not None:
+                labels_by_key[label_key] = derived_labels
+    return labels_by_key
 
 
 def extract_slide_embedding_records(
@@ -59,14 +107,13 @@ def extract_slide_embedding_records(
             if "embedding" not in outputs:
                 continue
 
-            available_label_keys = [label_key for label_key in label_keys if label_key in adata.obs]
             slide_records.append(
                 SlideEmbeddingRecord(
                     slide_name=Path(data_path).name,
                     obs_names=adata.obs_names.to_numpy(copy=True),
                     spatial=adata.obsm["spatial"].copy() if "spatial" in adata.obsm else None,
                     embeddings=outputs["embedding"].detach().cpu().numpy(),
-                    labels_by_key={label_key: adata.obs[label_key].to_numpy() for label_key in available_label_keys},
+                    labels_by_key=_extract_labels_by_key(adata, label_keys),
                 ),
             )
 

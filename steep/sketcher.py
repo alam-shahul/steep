@@ -9,6 +9,8 @@ import anndata as ad
 import numpy as np
 import scanpy as sc
 from geosketch import gs
+from loguru import logger
+from tqdm import tqdm
 
 from steep.utils import hopper_sketch_indices, num_edges_from_adata
 
@@ -423,6 +425,14 @@ class MoGSketcher(AnnDataSketcher):
 
     def _train_mog(self, features, edge_index, edge_attr):
         num_features = features.size(1)
+        logger.info(
+            "MoG training start (cells={}, edges={}, features={}, epochs={}, device={})",
+            features.size(0),
+            edge_index.size(1),
+            num_features,
+            self.epochs,
+            self.device,
+        )
 
         model = MoG(
             num_features=num_features,
@@ -442,20 +452,28 @@ class MoGSketcher(AnnDataSketcher):
         optimizer = torch.optim.Adam(model.learner.parameters(), lr=self.lr)
 
         if self.use_topo:
+            start = time.perf_counter()
+            logger.info("MoG topology scoring start")
             model.learner.get_topo_val(edge_index)
+            logger.info("MoG topology scoring complete ({:.2f}s)", time.perf_counter() - start)
         else:
             model.learner.topo_val = None
+            logger.info("MoG topology scoring disabled")
 
         if self.use_expr_prior:
             model.learner.expr_prior = self._cached_expr_prior
+            logger.info("MoG expression prior enabled")
         else:
             model.learner.expr_prior = None
+            logger.info("MoG expression prior disabled")
 
         best_loss = float("inf")
         best_score = None
         best_aux = None
+        log_interval = max(1, self.epochs // 10)
 
-        for epoch in range(1, self.epochs + 1):
+        progress = tqdm(range(1, self.epochs + 1), desc="MoG training", unit="epoch", leave=False)
+        for epoch in progress:
             if (epoch - 1) % self.temp_N == 0:
                 decay_temp = np.exp(-1.0 * self.temp_r * epoch)
                 temp = max(0.05, decay_temp)
@@ -492,9 +510,26 @@ class MoGSketcher(AnnDataSketcher):
                     "loss_expr": float(eval_out["loss_expr"].item()),
                 }
 
+            progress.set_postfix(loss=f"{eval_loss:.4g}", best=f"{best_loss:.4g}")
+            if epoch == 1 or epoch % log_interval == 0 or epoch == self.epochs:
+                logger.info(
+                    "MoG epoch {}/{} loss={:.6f} best_loss={:.6f}",
+                    epoch,
+                    self.epochs,
+                    eval_loss,
+                    best_loss,
+                )
+
         if best_score is None:
             raise RuntimeError("MoG did not produce a valid score.")
 
+        logger.info(
+            "MoG training complete (best_loss={:.6f}, balance={:.6f}, topo={:.6f}, expr={:.6f})",
+            best_loss,
+            best_aux["loss_balance"],
+            best_aux["loss_topo"],
+            best_aux["loss_expr"],
+        )
         return best_score, best_loss, best_aux
 
     def _edge_index_to_adj(
@@ -681,23 +716,46 @@ class MoGSketcher(AnnDataSketcher):
         fix_seed(self.random_seed)
 
         adata = adata.copy()
+        slide_name = Path(input_path).name if input_path is not None else "<memory>"
+        logger.info(
+            "MoG slide sketch start (slide={}, cells={}, vars={}, mode={}, retention_ratio={})",
+            slide_name,
+            adata.n_obs,
+            adata.n_vars,
+            self.sketch_mode,
+            self.mog_args.get("retention_ratio", None),
+        )
 
         need_pca = (self.feature_key == "X_pca") or (self.use_expr_prior and self.expr_prior_key == "X_pca")
         if need_pca and "X_pca" not in adata.obsm:
+            logger.info("MoG PCA start (slide={})", slide_name)
             sc.tl.pca(adata)
+            logger.info("MoG PCA complete (slide={})", slide_name)
 
         features = self._get_feature_matrix(adata)
         edge_index, adj_values = self._get_edge_index_and_adj_values(adata)
         edge_attr = self._build_edge_attr(adata, edge_index, adj_values)
+        logger.info(
+            "MoG graph prepared (slide={}, cells={}, edges={}, features={}, edge_attr_mode={})",
+            slide_name,
+            features.size(0),
+            edge_index.size(1),
+            features.size(1),
+            self.edge_attr_mode,
+        )
 
         if self.use_expr_prior:
+            start = time.perf_counter()
+            logger.info("MoG expression prior start (slide={})", slide_name)
             self._cached_expr_prior = self._compute_expr_prior(adata, edge_index, features)
+            logger.info("MoG expression prior complete (slide={}, {:.2f}s)", slide_name, time.perf_counter() - start)
         else:
             self._cached_expr_prior = None
 
         cache_path = self._get_score_cache_path(adata, input_path=input_path)
 
         if cache_path is not None and cache_path.exists():
+            logger.info("MoG score cache hit at {}", cache_path)
             cached_edge_index, best_score, best_loss, best_aux = self._load_score_cache(cache_path)
             cached_edge_index = cached_edge_index.to(edge_index.device)
             best_score = best_score.to(edge_index.device)
@@ -705,11 +763,17 @@ class MoGSketcher(AnnDataSketcher):
             if cached_edge_index.shape != edge_index.shape or not torch.equal(cached_edge_index, edge_index):
                 raise RuntimeError("Cached edge_index does not match current edge_index.")
         else:
+            if cache_path is None:
+                logger.info("MoG score cache disabled (slide={})", slide_name)
+            else:
+                logger.info("MoG score cache miss (slide={}, path={})", slide_name, cache_path)
+            logger.info("MoG slide model training start (slide={})", slide_name)
             best_score, best_loss, best_aux = self._train_mog(
                 features=features,
                 edge_index=edge_index,
                 edge_attr=edge_attr,
             )
+            logger.info("MoG slide model training complete (slide={}, best_loss={:.6f})", slide_name, best_loss)
             if cache_path is not None:
                 self._save_score_cache(
                     cache_path=cache_path,
@@ -718,6 +782,7 @@ class MoGSketcher(AnnDataSketcher):
                     best_loss=best_loss,
                     best_aux=best_aux,
                 )
+                logger.info("MoG score cache saved at {}", cache_path)
 
         orig_edges = int(adata.obsp[self.adjacency_matrix_key].nnz)
 
@@ -766,6 +831,15 @@ class MoGSketcher(AnnDataSketcher):
             raise ValueError(f"Unsupported sketch_mode: {self.sketch_mode}")
 
         final_edges = int(new_adata.obsp[self.adjacency_matrix_key].nnz)
+        logger.info(
+            "MoG slide sketch complete (slide={}, cells {} -> {}, edges {} -> {}, best_loss={:.6f})",
+            slide_name,
+            adata.n_obs,
+            new_adata.n_obs,
+            orig_edges,
+            final_edges,
+            best_loss,
+        )
 
         new_adata.uns["mog_best_loss"] = float(best_loss)
         new_adata.uns["mog_edge_retention_ratio"] = final_edges / orig_edges if orig_edges > 0 else 0.0
@@ -788,6 +862,7 @@ class MoGSketcher(AnnDataSketcher):
         output_path = Path(output_path)
 
         start_time = time.perf_counter()
+        logger.info("MoG sketch file start (input={}, output={})", input_path, output_path)
 
         backed_adata = ad.read_h5ad(input_path, backed="r")
         adata = backed_adata.to_memory()
@@ -799,6 +874,7 @@ class MoGSketcher(AnnDataSketcher):
         sketched_adata.write_h5ad(output_path)
 
         sketch_time_seconds = time.perf_counter() - start_time
+        logger.info("MoG sketch file complete ({:.2f}s)", sketch_time_seconds)
 
         original_num_cells = int(adata.n_obs)
         sketched_num_cells = int(sketched_adata.n_obs)

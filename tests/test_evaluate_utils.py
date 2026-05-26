@@ -141,6 +141,8 @@ def test_save_slide_clustering_plot_sets_squidpy_library_id(tmp_path: Path):
 def test_extract_slide_embedding_records_returns_expected_fields(tmp_path: Path):
     adata = ad.AnnData(X=np.ones((3, 2), dtype=np.float32))
     adata.obs["cell_type"] = ["a", "b", "a"]
+    adata.obs["subclass"] = ["L2/3 IT Glut", "Lamp5 Gaba", "vascular endothelial"]
+    adata.obs["class"] = ["excitatory", "inhibitory", "endothelial"]
     adata.obsm["spatial"] = np.array([[0.0, 0.0], [1.0, 0.5], [2.0, 1.0]], dtype=np.float32)
     data_path = tmp_path / "slide.h5ad"
     adata.write_h5ad(data_path)
@@ -177,13 +179,18 @@ def test_extract_slide_embedding_records_returns_expected_fields(tmp_path: Path)
         device="cpu",
     )
 
-    records = extract_slide_embedding_records(trainer, label_keys=["cell_type"])
+    records = extract_slide_embedding_records(trainer, label_keys=["cell_type", "cell_type_coarse"])
 
     assert len(records) == 1
     record = records[0]
     assert record.slide_name == "slide.h5ad"
     assert record.embeddings.shape == (3, 1)
     assert record.labels_by_key["cell_type"].tolist() == ["a", "b", "a"]
+    assert record.labels_by_key["cell_type_coarse"].tolist() == [
+        "Excitatory neuron",
+        "Inhibitory neuron",
+        "Endothelial",
+    ]
 
 
 def test_evaluate_split_classification_scores_test_slides_and_saves_confusion_matrix(tmp_path: Path):

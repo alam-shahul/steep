@@ -96,6 +96,7 @@ def mog_model(mock_args, tiny_graph, device):
 
 
 def test_mog_forward_shapes(mog_model, tiny_graph, mock_args, device):
+    pytest.importorskip("torch_cluster")
     data = tiny_graph.to(device)
 
     x, edge_index = data.x, data.edge_index
@@ -131,6 +132,7 @@ def test_mog_forward_shapes(mog_model, tiny_graph, mock_args, device):
 
 
 def test_mog_one_train_step_decreases_backward_ok(mog_model, tiny_graph, mock_args, device):
+    pytest.importorskip("torch_cluster")
     model = mog_model
     model.train()
     data = tiny_graph.to(device)

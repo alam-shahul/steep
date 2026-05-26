@@ -3,35 +3,31 @@
 import argparse
 import csv
 import json
-import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
+from hydra import compose, initialize_config_dir
 from loguru import logger
 
-DEFAULT_RECORDS_DIR = Path("/work/magroup/xinyuelu/steep/experiments/zhuang_subset/records")
-DEFAULT_EVAL_ROOT = Path("/work/magroup/shared/steep/evaluations")
+mpl.rcParams["pdf.fonttype"] = 42
+mpl.rcParams["ps.fonttype"] = 42
+
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "steep" / "config"
 
 
-EVALUATION_JSON_RE = re.compile(
-    r'"evaluation_json"\s*:\s*"([^"]+evaluation\.json)"',
-)
-
-CHECKPOINT_RE = re.compile(
-    r"Checkpoint directory initialized at\s+(.*/checkpoints/([A-Za-z0-9\-]+))",
-)
-
-
-LOG_NAME_RE = re.compile(
-    r"run_r(?P<ratio>[0-9]+(?:[.p][0-9]+)?)_s(?P<seed>[0-9]+)\.log$",
-)
+def default_eval_root() -> Path:
+    with initialize_config_dir(version_base=None, config_dir=str(CONFIG_DIR)):
+        cfg = compose(config_name="config")
+    return Path(cfg.cache_dir) / "evaluations"
 
 
 EDGE_METHOD_NAME_TO_TYPE = {
     "mog": "steep.sketcher.MoGSketcher",
+    "mog_edge": "steep.sketcher.MoGSketcher",
     "edge_random": "steep.sketcher.RandomEdgeSketcher",
     "edge_spatialshort": "steep.sketcher.SpatialShortEdgeSketcher",
     "edge_spatiallong": "steep.sketcher.SpatialLongEdgeSketcher",
@@ -66,6 +62,7 @@ METHOD_GROUP = {
 METHOD_NAME_DISPLAY = {
     # edge-based
     "mog": "mog",
+    "mog_edge": "mog_edge",
     "edge_random": "edge_random",
     "edge_spatialshort": "edge_spatialshort",
     "edge_spatiallong": "edge_spatiallong",
@@ -83,6 +80,7 @@ METHOD_NAME_DISPLAY = {
 
 
 EDGE_METHOD_ORDER = [
+    "mog_edge",
     "mog",
     "edge_random",
     "edge_spatialshort",
@@ -105,6 +103,7 @@ NODE_METHOD_ORDER = [
 
 EDGE_METHOD_PALETTE = {
     "mog": "#D55E00",
+    "mog_edge": "#D55E00",
     "edge_random": "#7A7A7A",
     "edge_spatialshort": "#0072B2",
     "edge_spatiallong": "#56B4E9",
@@ -126,24 +125,14 @@ NODE_METHOD_PALETTE = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build benchmark summary and separate edge/node plots from log files.",
-    )
-
-    parser.add_argument(
-        "--records-dir",
-        type=Path,
-        default=DEFAULT_RECORDS_DIR,
-        help="Directory containing method folders with run_r*_s*.log files.",
+        description="Build benchmark summary and separate edge/node plots from evaluation config/metric files.",
     )
 
     parser.add_argument(
         "--eval-root",
         type=Path,
-        default=DEFAULT_EVAL_ROOT,
-        help=(
-            "Fallback root directory containing evaluation folders. "
-            "Used only when evaluation_json is not found in the log."
-        ),
+        default=default_eval_root(),
+        help="Root directory containing evaluation folders with config.json and evaluation.json.",
     )
 
     parser.add_argument(
@@ -164,14 +153,32 @@ def parse_args() -> argparse.Namespace:
         "--label-key",
         type=str,
         default="original_leiden",
-        help="Label key for NMI plot.",
+        help="Label key for the default NMI plot. Ignored when --metric-key is provided.",
+    )
+
+    parser.add_argument(
+        "--metric-key",
+        type=str,
+        default=None,
+        help=(
+            "Flattened evaluation metric key for the first plot panel, for example "
+            "evaluation.classification_metrics_by_label_key.cell_type_coarse.accuracy. "
+            "Default: evaluation.metrics_by_label_key.<label-key>.nmi_mean."
+        ),
+    )
+
+    parser.add_argument(
+        "--metric-label",
+        type=str,
+        default=None,
+        help="Y-axis label for --metric-key. Default: the metric key suffix.",
     )
 
     parser.add_argument(
         "--latest-only",
         action="store_true",
         help=(
-            "If multiple logs exist for the same method/ratio/seed, keep the one whose "
+            "If multiple evaluations exist for the same method/ratio/seed, keep the one whose "
             "evaluation.json has the newest modification time."
         ),
     )
@@ -239,47 +246,37 @@ def method_color(method_name: str, group: str) -> str:
     return palette.get(method_name, "#333333")
 
 
-def parse_ratio_seed_from_log_name(log_path: Path) -> tuple[float, int] | None:
-    match = LOG_NAME_RE.search(log_path.name)
-    if match is None:
-        return None
+def method_name_from_sketcher_config(sketcher_config: dict[str, Any]) -> str | None:
+    sketcher_type = sketcher_config.get("type")
+    args = sketcher_config.get("args") or {}
 
-    ratio_text = match.group("ratio").replace("p", ".")
-    ratio = float(ratio_text)
-    seed = int(match.group("seed"))
+    if sketcher_type == "steep.sketcher.MoGSketcher":
+        sketch_mode = args.get("sketch_mode")
+        if sketch_mode == "edge":
+            return "mog_edge"
+        if sketch_mode == "node":
+            return "mog_node"
+        return "mog"
 
-    return ratio, seed
+    for method_name, method_type in METHOD_NAME_TO_TYPE.items():
+        if method_type == sketcher_type:
+            return method_name
 
-
-def read_log_text(log_path: Path) -> str | None:
-    try:
-        return log_path.read_text(errors="ignore")
-    except OSError:
-        return None
-
-
-def parse_evaluation_json_from_log(log_path: Path) -> Path | None:
-    text = read_log_text(log_path)
-    if text is None:
-        return None
-
-    matches = EVALUATION_JSON_RE.findall(text)
-    if not matches:
-        return None
-
-    return Path(matches[-1])
+    return None
 
 
-def parse_checkpoint_id_from_log(log_path: Path) -> str | None:
-    text = read_log_text(log_path)
-    if text is None:
-        return None
+def retention_ratio_from_sketcher_config(sketcher_config: dict[str, Any]) -> float | None:
+    args = sketcher_config.get("args") or {}
+    value = args.get("retention_ratio")
+    if value is None:
+        value = (args.get("mog_args") or {}).get("retention_ratio")
+    return None if value is None else float(value)
 
-    matches = CHECKPOINT_RE.findall(text)
-    if not matches:
-        return None
 
-    return matches[-1][1]
+def random_seed_from_sketcher_config(sketcher_config: dict[str, Any]) -> int | None:
+    args = sketcher_config.get("args") or {}
+    value = args.get("random_seed")
+    return None if value is None else int(value)
 
 
 def load_evaluation_json(eval_json: Path) -> dict[str, Any] | None:
@@ -295,61 +292,50 @@ def load_evaluation_json(eval_json: Path) -> dict[str, Any] | None:
         return None
 
 
-def fallback_eval_json_from_checkpoint(
-    log_path: Path,
-    eval_root: Path,
-) -> tuple[Path | None, str | None]:
-    checkpoint_id = parse_checkpoint_id_from_log(log_path)
+def load_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
 
-    if checkpoint_id is None:
-        return None, None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        return None
+    except OSError:
+        return None
 
-    return eval_root / checkpoint_id / "evaluation.json", checkpoint_id
 
+def build_row_from_config(config_path: Path) -> dict[str, Any] | None:
+    config = load_json(config_path)
+    if config is None or config.get("condition") != "sketch":
+        return None
 
-def build_row_from_log(
-    log_path: Path,
-    eval_root: Path,
-) -> dict[str, Any] | None:
-    method_name = log_path.parent.name
+    input_config = config.get("input_config") or {}
+    sketcher_config = input_config.get("sketcher") or {}
+    method_name = method_name_from_sketcher_config(sketcher_config)
+    if method_name is None:
+        return None
 
     method_type = method_name_to_type(method_name)
     method_group = method_name_to_group(method_name)
+    retention_ratio = retention_ratio_from_sketcher_config(sketcher_config)
+    random_seed = random_seed_from_sketcher_config(sketcher_config)
 
-    if method_type is None or method_group is None:
+    if method_type is None or method_group is None or retention_ratio is None or random_seed is None:
         return None
 
-    ratio_seed = parse_ratio_seed_from_log_name(log_path)
-    if ratio_seed is None:
-        logger.warning("Skipping {}: cannot parse retention ratio / seed from log name", log_path)
-        return None
-
-    retention_ratio, random_seed = ratio_seed
-
-    eval_json = parse_evaluation_json_from_log(log_path)
-    checkpoint_id = parse_checkpoint_id_from_log(log_path)
-
-    if eval_json is None:
-        eval_json, fallback_checkpoint_id = fallback_eval_json_from_checkpoint(log_path, eval_root)
-        if checkpoint_id is None:
-            checkpoint_id = fallback_checkpoint_id
-
-    if eval_json is None:
-        logger.warning("Skipping {}: neither evaluation_json nor checkpoint id found in log", log_path)
-        return None
-
+    eval_json = config_path.with_name("evaluation.json")
     evaluation = load_evaluation_json(eval_json)
     if evaluation is None:
-        logger.warning("Skipping {}: evaluation.json not found or invalid at {}", log_path, eval_json)
+        logger.warning("Skipping {}: evaluation.json not found or invalid at {}", config_path, eval_json)
         return None
 
     short_name = short_method_name_from_folder(method_name)
 
-    row = {
+    return {
         "method_folder": method_name,
         "method_group": method_group,
-        "log_path": str(log_path),
-        "checkpoint_id": checkpoint_id,
+        "config_json": str(config_path),
         "evaluation_json": str(eval_json),
         "evaluation_directory": str(eval_json.parent),
         "condition": "sketch",
@@ -360,32 +346,17 @@ def build_row_from_log(
         **flatten_dict(evaluation, prefix="evaluation"),
     }
 
-    return row
-
 
 def collect_rows(
-    records_dir: Path,
     eval_root: Path,
     latest_only: bool,
 ) -> list[dict[str, Any]]:
     rows = []
 
-    for method_dir in sorted(records_dir.iterdir()):
-        if not method_dir.is_dir():
-            continue
-
-        method_name = method_dir.name
-
-        if method_name_to_type(method_name) is None:
-            continue
-
-        for log_path in sorted(method_dir.glob("run_r*_s*.log")):
-            row = build_row_from_log(
-                log_path=log_path,
-                eval_root=eval_root,
-            )
-            if row is not None:
-                rows.append(row)
+    for config_path in sorted(eval_root.glob("*/config.json")):
+        row = build_row_from_config(config_path)
+        if row is not None:
+            rows.append(row)
 
     if latest_only:
         rows = deduplicate_rows_by_latest_evaluation(rows)
@@ -501,7 +472,7 @@ def plot_panel(
         stds = [float(np.std(scores[method][x])) for x in xs]
 
         color = method_color(method, group)
-        emphasize = method in {"mog", "mog_node"}
+        emphasize = method in {"mog", "mog_edge", "mog_node"}
 
         ax.errorbar(
             xs,
@@ -525,11 +496,14 @@ def write_plot(
     rows: list[dict[str, Any]],
     output_path: Path,
     label_key: str,
+    metric_key: str | None,
+    metric_label: str | None,
     group: str,
 ) -> None:
-    nmi_key = f"evaluation.metrics_by_label_key.{label_key}.nmi_mean"
+    score_key = metric_key or f"evaluation.metrics_by_label_key.{label_key}.nmi_mean"
+    score_label = metric_label or ("NMI" if metric_key is None else score_key.split(".")[-1])
 
-    nmi_scores = group_metric_by_method_and_x(rows, nmi_key)
+    score_values = group_metric_by_method_and_x(rows, score_key)
 
     gpu_memory_scores_raw = group_metric_by_method_and_x(
         rows,
@@ -546,20 +520,20 @@ def write_plot(
         "evaluation.epoch_time_mean_seconds",
     )
 
-    if not nmi_scores:
-        available_nmi_cols = sorted(
+    if not score_values:
+        available_metric_cols = sorted(
             {
                 key
                 for row in rows
                 for key in row
-                if key.startswith("evaluation.metrics_by_label_key.") and key.endswith(".nmi_mean")
+                if key.startswith("evaluation.") and isinstance(row.get(key), int | float | str)
             },
         )
 
-        msg = f"No valid rows found for `{nmi_key}` in group `{group}`.\n" f"Available NMI columns include:\n"
+        msg = f"No valid rows found for `{score_key}` in group `{group}`.\n" f"Available metric columns include:\n"
 
-        if available_nmi_cols:
-            msg += "\n".join(available_nmi_cols[:50])
+        if available_metric_cols:
+            msg += "\n".join(available_metric_cols[:75])
         else:
             msg += "None"
 
@@ -571,9 +545,9 @@ def write_plot(
 
     plot_panel(
         axes[0],
-        nmi_scores,
-        ylabel=f"NMI ({label_key})",
-        title=f"{group} NMI",
+        score_values,
+        ylabel=score_label,
+        title=f"{group} {score_label}",
         group=group,
     )
 
@@ -615,7 +589,10 @@ def write_plot(
 
     fig.subplots_adjust(wspace=0.25, right=0.82)
 
+    pdf_output_path = output_path.with_suffix(".pdf")
+
     plt.savefig(output_path, dpi=250, bbox_inches="tight")
+    plt.savefig(pdf_output_path, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -651,14 +628,13 @@ def main() -> None:
     args = parse_args()
 
     rows = collect_rows(
-        records_dir=args.records_dir,
         eval_root=args.eval_root,
         latest_only=args.latest_only,
     )
 
     if not rows:
         raise FileNotFoundError(
-            f"No valid rows found under {args.records_dir}.",
+            f"No valid rows found under {args.eval_root}.",
         )
 
     write_csv(rows, args.output_csv)
@@ -685,9 +661,11 @@ def main() -> None:
             group_rows,
             group_plot,
             label_key=args.label_key,
+            metric_key=args.metric_key,
+            metric_label=args.metric_label,
             group=group,
         )
-        logger.info("Wrote {} plot to {}", group, group_plot)
+        logger.info("Wrote {} plot to {} and {}", group, group_plot, group_plot.with_suffix(".pdf"))
 
     print_summary(rows)
 
