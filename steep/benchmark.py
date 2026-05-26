@@ -4,32 +4,29 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import anndata as ad
-import numpy as np
 import torch
 from loguru import logger
 from omegaconf import OmegaConf
+from torch.utils.data import Subset
 
 import wandb
 from steep.trainer import setup_trainer
 from steep.utils import (
-    ClassificationLabelStore,
     DatasetSummary,
     LabelMetricStore,
-    accumulate_classification_results,
     accumulate_label_results,
     compute_peak_gpu_memory,
     evaluate_and_plot_slide_embeddings,
     evaluate_sketch_cluster_agreement,
-    evaluate_slide_classification,
+    evaluate_split_classification,
     extract_loss_metrics,
     extract_slide_embedding_records,
     get_fully_qualified_cache_paths,
     instantiate_from_config,
     iter_evaluation_results,
     serialize_dataclass,
-    summarize_classification_scores,
     summarize_cluster_scores,
+    summarize_split_classification_scores,
 )
 
 
@@ -103,6 +100,7 @@ class Benchmark:
         n_neighbors: int = 15,
         leiden_resolution: float = 1.0,
         clustering_backend: str = "scanpy",
+        classification_backend: str = "sklearn",
         resume_from_checkpoint: bool = True,
         run_wandb: bool = False,
         classification_train_ratio: float = 0.1,
@@ -116,6 +114,7 @@ class Benchmark:
         self.n_neighbors = int(n_neighbors)
         self.leiden_resolution = float(leiden_resolution)
         self.clustering_backend = str(clustering_backend)
+        self.classification_backend = str(classification_backend)
         self.resume_from_checkpoint = bool(resume_from_checkpoint)
         self.run_wandb = bool(run_wandb)
         self.classification_train_ratio = float(classification_train_ratio)
@@ -129,6 +128,7 @@ class Benchmark:
             evaluation_data=self.trainer.data,
             stage_name="baseline",
             sketched_data_directory=None,
+            resume_from_checkpoint=True,
         )
 
     def _run_sketch(self) -> SketchResult:
@@ -145,6 +145,7 @@ class Benchmark:
             evaluation_data=self.trainer.data,
             stage_name="sketch",
             sketched_data_directory=sketched_dir,
+            resume_from_checkpoint=self.resume_from_checkpoint,
         )
         sketch = SketchResult(
             output_directory=str(sketched_dir),
@@ -202,6 +203,7 @@ class Benchmark:
                 "benchmark.args.n_neighbors",
                 "benchmark.args.leiden_resolution",
                 "benchmark.args.clustering_backend",
+                "benchmark.args.classification_backend",
             ),
         )
         eval_dir.mkdir(parents=True, exist_ok=True)
@@ -211,53 +213,69 @@ class Benchmark:
 
         return eval_dir
 
-    def _build_train_masks(
-        self,
-        slide_records,
-        sketched_data_directory: str | Path | None = None,
-    ) -> dict[str, np.ndarray]:
-        """Build per-slide boolean train masks for classification eval.
+    def _dataset_paths(self, dataset) -> list[Path] | None:
+        """Resolve slide file paths for datasets that preserve slide-level
+        indexing."""
+        if hasattr(dataset, "data_paths"):
+            return [Path(data_path) for data_path in dataset.data_paths]
 
-        - If sketched_data_directory is given: train = cells whose obs_names are in the
-          corresponding sketched h5ad.
-        - Otherwise (baseline): train = random subsample with the same retention_ratio
-          as the cfg.sketcher or self.classification_train_ratio.
+        if isinstance(dataset, Subset):
+            parent_paths = self._dataset_paths(dataset.dataset)
+            if parent_paths is None:
+                return None
+            return [parent_paths[int(index)] for index in dataset.indices]
 
-        """
-        train_masks: dict[str, np.ndarray] = {}
+        return None
 
-        if sketched_data_directory is not None:
-            sketched_dir = Path(sketched_data_directory)
-            for record in slide_records:
-                sketched_path = sketched_dir / record.slide_name
-                if not sketched_path.exists():
-                    train_masks[record.slide_name] = None
-                    continue
-                sketched_adata = ad.read_h5ad(sketched_path, backed="r")
-                sketched_obs_names = set(sketched_adata.obs_names.to_numpy().tolist())
-                sketched_adata.file.close()
-                train_masks[record.slide_name] = np.isin(record.obs_names, list(sketched_obs_names))
-        else:
-            retention_ratio = OmegaConf.select(
-                self.cfg,
-                "sketcher.args.retention_ratio",
-                default=self.classification_train_ratio,
+    def _slide_names_for_split(self, trainer, split: str) -> set[str] | None:
+        split_dataset = getattr(trainer, "datasets", {}).get(split)
+        if split_dataset is None:
+            return None
+
+        paths = self._dataset_paths(split_dataset)
+        if paths is None:
+            return None
+
+        return {path.name for path in paths}
+
+    def _classification_record_splits(self, trainer, slide_records, stage: str):
+        train_names = self._slide_names_for_split(trainer, "train")
+        test_names = self._slide_names_for_split(trainer, "test")
+        if train_names is None or test_names is None:
+            logger.warning(
+                "{} classification skipped because trainer splits are not slide-level datasets",
+                stage.capitalize(),
             )
-            retention_ratio = float(retention_ratio)
-            rng = np.random.default_rng(self.random_seed)
-            for record in slide_records:
-                n = len(record.obs_names)
-                if n == 0:
-                    train_masks[record.slide_name] = np.zeros(0, dtype=bool)
-                    continue
-                n_train = max(1, int(np.ceil(n * retention_ratio)))
-                n_train = min(n_train, n)
-                indices = rng.choice(n, size=n_train, replace=False)
-                mask = np.zeros(n, dtype=bool)
-                mask[indices] = True
-                train_masks[record.slide_name] = mask
+            return [], []
 
-        return train_masks
+        if not train_names or not test_names:
+            logger.warning(
+                "{} classification skipped because train/test slide split is empty",
+                stage.capitalize(),
+            )
+            return [], []
+
+        records_by_name = {record.slide_name: record for record in slide_records}
+        train_records = [records_by_name[name] for name in sorted(train_names) if name in records_by_name]
+        test_records = [records_by_name[name] for name in sorted(test_names) if name in records_by_name]
+
+        missing_train = sorted(train_names - set(records_by_name))
+        missing_test = sorted(test_names - set(records_by_name))
+        if missing_train or missing_test:
+            logger.warning(
+                "{} classification split has missing extracted slides (train missing: {}, test missing: {})",
+                stage.capitalize(),
+                len(missing_train),
+                len(missing_test),
+            )
+
+        if not train_records or not test_records:
+            logger.warning(
+                "{} classification skipped because no extracted train/test records matched the split",
+                stage.capitalize(),
+            )
+
+        return train_records, test_records
 
     def evaluate_embeddings(
         self,
@@ -316,35 +334,26 @@ class Benchmark:
 
         clustering_summary = summarize_cluster_scores(self.label_keys, metric_store)
 
-        # === Classification eval ===
-        train_masks = self._build_train_masks(slide_records, sketched_data_directory)
-
-        classif_jobs = []
-        for slide_record in slide_records:
-            train_mask = train_masks.get(slide_record.slide_name)
-            if train_mask is None or train_mask.sum() < 2:
-                continue
-            classif_jobs.append(
-                {
-                    "labels_by_key": slide_record.labels_by_key,
-                    "embeddings": slide_record.embeddings,
-                    "train_mask": train_mask,
-                    "random_seed": self.random_seed,
-                    "max_iter": self.classification_max_iter,
-                },
+        logger.info("{} train-slide/test-slide classification", stage.capitalize())
+        train_records, test_records = self._classification_record_splits(
+            trainer=trainer,
+            slide_records=slide_records,
+            stage=stage,
+        )
+        classif_results = {}
+        if train_records and test_records:
+            classif_results = evaluate_split_classification(
+                train_records=train_records,
+                test_records=test_records,
+                label_keys=self.label_keys,
+                n_neighbors=self.n_neighbors,
+                confusion_matrix_dir=Path(eval_dir) / "confusion_matrices",
+                stage=stage,
+                backend=self.classification_backend,
             )
+            self._log_confusion_matrices_to_wandb(Path(eval_dir))
 
-        classif_store = {label_key: ClassificationLabelStore() for label_key in self.label_keys}
-        if classif_jobs:
-            for slide_results in iter_evaluation_results(
-                evaluate_slide_classification,
-                classif_jobs,
-                max_workers=max(1, self.num_workers),
-                progress_desc="Scoring Classification",
-            ):
-                accumulate_classification_results(classif_store, slide_results)
-
-        classif_summary = summarize_classification_scores(self.label_keys, classif_store)
+        classif_summary = summarize_split_classification_scores(self.label_keys, classif_results)
 
         return {
             **clustering_summary,
@@ -357,13 +366,14 @@ class Benchmark:
         evaluation_data,
         stage_name: str,
         sketched_data_directory: str | Path | None = None,
+        resume_from_checkpoint: bool = True,
     ) -> EvaluationResult:
         """Run training evaluation on a particular data object."""
         eval_dir = self.get_eval_dir(trainer.cfg)
 
         output_path = eval_dir / "evaluation.json"
         if output_path.exists():
-            if not self.resume_from_checkpoint:
+            if not resume_from_checkpoint:
                 logger.info("{} evaluation cache ignored for fresh run at {}", stage_name.capitalize(), output_path)
             else:
                 logger.info("{} cache hit at {}", stage_name.capitalize(), output_path)
@@ -405,7 +415,7 @@ class Benchmark:
 
         logger.info("{} model fitting", stage_name.capitalize())
         start_time = time.perf_counter()
-        trainer.fit(resume_from_checkpoint=self.resume_from_checkpoint)
+        trainer.fit(resume_from_checkpoint=resume_from_checkpoint)
         training_time_seconds = time.perf_counter() - start_time
         reused_checkpoint = bool(getattr(trainer, "last_fit_reused_checkpoint", False))
 
@@ -548,10 +558,24 @@ class Benchmark:
         for artifact_dir in artifact_dirs:
             if not artifact_dir.exists():
                 continue
+            self._log_confusion_matrices_to_wandb(artifact_dir, run=run)
             artifact = wandb.Artifact(f"{artifact_dir.name}_evaluation", type="evaluation_outputs")
             artifact.add_dir(str(artifact_dir))
             run.log_artifact(artifact)
         run.finish()
+
+    def _log_confusion_matrices_to_wandb(self, artifact_dir: Path, run=None) -> None:
+        run = wandb.run if run is None else run
+        if run is None:
+            return
+
+        confusion_matrix_dir = artifact_dir / "confusion_matrices"
+        if not confusion_matrix_dir.exists():
+            return
+
+        for image_path in sorted(confusion_matrix_dir.glob("*.png")):
+            image_key = f"confusion_matrices/{artifact_dir.name}/{image_path.stem}"
+            run.log({image_key: wandb.Image(str(image_path))})
 
     def _flatten_metrics(self, data: dict[str, Any], prefix: str = "") -> dict[str, Any]:
         """Flatten nested benchmark metrics for WandB logging."""

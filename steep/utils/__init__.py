@@ -1,3 +1,12 @@
+from steep.utils._classification import (
+    ClassificationLabelStore,
+    ClassificationMetricAccumulator,
+    accumulate_classification_results,
+    evaluate_slide_classification,
+    evaluate_split_classification,
+    summarize_classification_scores,
+    summarize_split_classification_scores,
+)
 from steep.utils._cluster import (
     LabelMetricStore,
     MetricAccumulator,
@@ -49,6 +58,13 @@ __all__ = [
     extract_loss_metrics.__name__,
     SlideEmbeddingRecord.__name__,
     extract_slide_embedding_records.__name__,
+    ClassificationMetricAccumulator.__name__,
+    ClassificationLabelStore.__name__,
+    evaluate_slide_classification.__name__,
+    evaluate_split_classification.__name__,
+    accumulate_classification_results.__name__,
+    summarize_classification_scores.__name__,
+    summarize_split_classification_scores.__name__,
     MetricAccumulator.__name__,
     LabelMetricStore.__name__,
     cluster_embeddings.__name__,

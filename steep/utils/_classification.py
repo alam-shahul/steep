@@ -2,16 +2,21 @@
 
 import warnings
 from dataclasses import dataclass, field
+from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, f1_score
+from loguru import logger
+from sklearn.metrics import ConfusionMatrixDisplay, accuracy_score, confusion_matrix, f1_score
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import LabelEncoder
 
 CLASSIFICATION_METRIC_NAMES = ("accuracy", "macro_f1", "weighted_f1")
 
 # Number of neighbors used by the kNN classifier.
 DEFAULT_N_NEIGHBORS = 5
+MAX_CONFUSION_MATRIX_CLASSES = 250
 
 
 @dataclass
@@ -146,6 +151,278 @@ def evaluate_slide_classification(
         }
 
     return results
+
+
+def _labels_for_records(records, label_key: str) -> np.ndarray:
+    return np.concatenate([record.labels_by_key[label_key] for record in records if label_key in record.labels_by_key])
+
+
+def _embeddings_for_records(records, label_key: str) -> np.ndarray:
+    return np.concatenate([record.embeddings for record in records if label_key in record.labels_by_key], axis=0)
+
+
+def _save_confusion_matrix(
+    y_test,
+    y_pred,
+    classes,
+    output_path: str | Path,
+) -> None:
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cm = confusion_matrix(y_test, y_pred, labels=classes)
+    width = max(6.0, min(18.0, 0.4 * len(classes) + 4.0))
+    fig, ax = plt.subplots(figsize=(width, width))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
+    disp.plot(cmap=plt.cm.Blues, ax=ax, colorbar=True, xticks_rotation="vertical")
+    ax.set_title("kNN cell type classification")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def _safe_filename(value: str) -> str:
+    return "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in str(value))
+
+
+def _to_numpy(values) -> np.ndarray:
+    if hasattr(values, "to_numpy"):
+        return values.to_numpy()
+    if hasattr(values, "get"):
+        return values.get()
+    return np.asarray(values)
+
+
+def _predict_knn(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    n_neighbors: int,
+    backend: str,
+    log_prefix: str | None = None,
+) -> tuple[np.ndarray, np.ndarray, str]:
+    if backend == "sklearn":
+        clf = KNeighborsClassifier(n_neighbors=n_neighbors, n_jobs=1)
+        if log_prefix is not None:
+            logger.info("{} fitting sklearn kNN", log_prefix)
+        clf.fit(X_train, y_train)
+        if log_prefix is not None:
+            logger.info("{} predicting with sklearn kNN", log_prefix)
+        return clf.predict(X_test), clf.classes_, "KNeighborsClassifier"
+
+    if backend not in {"rapids", "cuml"}:
+        raise ValueError(f"Unsupported classification backend: {backend}")
+
+    try:
+        from cuml.neighbors import KNeighborsClassifier as CuMLKNeighborsClassifier
+    except ImportError as exc:
+        raise ImportError(
+            "RAPIDS classification backend requires cuML. Install it with `uv sync --group rapids-cu12`.",
+        ) from exc
+
+    label_encoder = LabelEncoder()
+    y_train_encoded = label_encoder.fit_transform(y_train).astype(np.int32)
+    clf = CuMLKNeighborsClassifier(n_neighbors=n_neighbors, output_type="numpy")
+    if log_prefix is not None:
+        logger.info("{} fitting cuML kNN", log_prefix)
+    clf.fit(X_train.astype(np.float32, copy=False), y_train_encoded)
+    if log_prefix is not None:
+        logger.info("{} predicting with cuML kNN", log_prefix)
+    y_pred_encoded = _to_numpy(clf.predict(X_test.astype(np.float32, copy=False))).astype(np.int64, copy=False)
+    if log_prefix is not None:
+        logger.info("{} decoding cuML predictions", log_prefix)
+    y_pred = label_encoder.inverse_transform(y_pred_encoded)
+    return y_pred, label_encoder.classes_, "CuMLKNeighborsClassifier"
+
+
+def evaluate_split_classification(
+    train_records,
+    test_records,
+    label_keys: list[str] | tuple[str, ...],
+    n_neighbors: int = DEFAULT_N_NEIGHBORS,
+    confusion_matrix_dir: str | Path | None = None,
+    stage: str = "evaluation",
+    backend: str = "sklearn",
+) -> dict[str, dict[str, float | int | str] | None]:
+    """Fit kNN on train-slide embeddings and evaluate on test-slide
+    embeddings."""
+    warnings.simplefilter("ignore")
+    backend = str(backend).lower()
+
+    results: dict[str, dict[str, float | int | str] | None] = {}
+    for label_key in label_keys:
+        logger.info("{} classification for {} using {}", stage.capitalize(), label_key, backend)
+        if not any(label_key in record.labels_by_key for record in train_records):
+            logger.info("{} classification for {} skipped: no train labels", stage.capitalize(), label_key)
+            results[label_key] = None
+            continue
+        if not any(label_key in record.labels_by_key for record in test_records):
+            logger.info("{} classification for {} skipped: no test labels", stage.capitalize(), label_key)
+            results[label_key] = None
+            continue
+
+        X_train = _embeddings_for_records(train_records, label_key)
+        X_test = _embeddings_for_records(test_records, label_key)
+        y_train = _labels_for_records(train_records, label_key)
+        y_test = _labels_for_records(test_records, label_key)
+
+        valid_train = ~pd.isna(y_train)
+        valid_test = ~pd.isna(y_test)
+        if valid_train.sum() < 2 or valid_test.sum() < 1:
+            logger.info(
+                "{} classification for {} skipped: insufficient valid cells (train={}, test={})",
+                stage.capitalize(),
+                label_key,
+                int(valid_train.sum()),
+                int(valid_test.sum()),
+            )
+            results[label_key] = None
+            continue
+
+        X_train = X_train[valid_train]
+        X_test = X_test[valid_test]
+        y_train = y_train[valid_train]
+        y_test = y_test[valid_test]
+
+        train_classes = np.unique(y_train)
+        if len(train_classes) < 2:
+            logger.info(
+                "{} classification for {} skipped: fewer than two train classes",
+                stage.capitalize(),
+                label_key,
+            )
+            results[label_key] = None
+            continue
+
+        test_known_class_mask = np.isin(y_test, train_classes)
+        if test_known_class_mask.sum() < 1:
+            logger.info(
+                "{} classification for {} skipped: no test labels seen during training",
+                stage.capitalize(),
+                label_key,
+            )
+            results[label_key] = None
+            continue
+
+        X_test_known = X_test[test_known_class_mask]
+        y_test_known = y_test[test_known_class_mask]
+
+        effective_k = min(int(n_neighbors), int(X_train.shape[0]))
+        logger.info(
+            "{} classification for {} fitting kNN (train_cells={}, test_cells={}, classes={}, k={})",
+            stage.capitalize(),
+            label_key,
+            int(X_train.shape[0]),
+            int(len(y_test_known)),
+            int(len(train_classes)),
+            int(effective_k),
+        )
+        y_pred, classes, classifier_name = _predict_knn(
+            X_train=X_train,
+            y_train=y_train,
+            X_test=X_test_known,
+            n_neighbors=effective_k,
+            backend=backend,
+            log_prefix=f"{stage.capitalize()} classification for {label_key}",
+        )
+        logger.info("{} classification for {} computing metrics", stage.capitalize(), label_key)
+
+        confusion_matrix_path = None
+        if confusion_matrix_dir is not None:
+            filename = f"{_safe_filename(stage)}_{_safe_filename(label_key)}.png"
+            confusion_matrix_path = Path(confusion_matrix_dir) / filename
+            if len(classes) > MAX_CONFUSION_MATRIX_CLASSES:
+                logger.info(
+                    "{} classification for {} confusion matrix skipped: {} classes exceeds limit {}",
+                    stage.capitalize(),
+                    label_key,
+                    int(len(classes)),
+                    MAX_CONFUSION_MATRIX_CLASSES,
+                )
+                confusion_matrix_path = None
+            else:
+                logger.info(
+                    "{} classification for {} rendering confusion matrix (classes={})",
+                    stage.capitalize(),
+                    label_key,
+                    int(len(classes)),
+                )
+                _save_confusion_matrix(
+                    y_test=y_test_known,
+                    y_pred=y_pred,
+                    classes=classes,
+                    output_path=confusion_matrix_path,
+                )
+                logger.info(
+                    "{} classification for {} confusion matrix saved to {}",
+                    stage.capitalize(),
+                    label_key,
+                    confusion_matrix_path,
+                )
+
+        results[label_key] = {
+            "accuracy": float(accuracy_score(y_test_known, y_pred)),
+            "macro_f1": float(f1_score(y_test_known, y_pred, average="macro", zero_division=0)),
+            "weighted_f1": float(f1_score(y_test_known, y_pred, average="weighted", zero_division=0)),
+            "count": int(len(y_test_known)),
+            "n_classes_train": int(len(train_classes)),
+            "n_train": int(X_train.shape[0]),
+            "n_test": int(len(y_test_known)),
+            "n_train_slides": int(len(train_records)),
+            "n_test_slides": int(len(test_records)),
+            "n_neighbors": int(effective_k),
+            "classifier": classifier_name,
+            "classification_backend": backend,
+            "split": "train_slide_test_slide",
+            "n_test_dropped_unknown_class": int((~test_known_class_mask).sum()),
+            "confusion_matrix_path": None if confusion_matrix_path is None else str(confusion_matrix_path),
+        }
+        logger.info(
+            "{} classification for {} complete (accuracy={:.4f}, macro_f1={:.4f}, weighted_f1={:.4f})",
+            stage.capitalize(),
+            label_key,
+            results[label_key]["accuracy"],
+            results[label_key]["macro_f1"],
+            results[label_key]["weighted_f1"],
+        )
+
+    return results
+
+
+def summarize_split_classification_scores(
+    label_keys: list[str] | tuple[str, ...],
+    results_by_label_key: dict[str, dict[str, float | int | str] | None],
+) -> dict[str, object]:
+    metrics_by_label_key = {}
+    for label_key in label_keys:
+        result = results_by_label_key.get(label_key)
+        if result is None:
+            metrics_by_label_key[label_key] = {
+                "accuracy_mean": None,
+                "accuracy_weighted_mean": None,
+                "macro_f1_mean": None,
+                "macro_f1_weighted_mean": None,
+                "weighted_f1_mean": None,
+                "weighted_f1_weighted_mean": None,
+                "evaluated_slides": 0,
+                "split": "train_slide_test_slide",
+            }
+            continue
+
+        metrics_by_label_key[label_key] = {
+            **result,
+            "accuracy_mean": result["accuracy"],
+            "accuracy_weighted_mean": result["accuracy"],
+            "macro_f1_mean": result["macro_f1"],
+            "macro_f1_weighted_mean": result["macro_f1"],
+            "weighted_f1_mean": result["weighted_f1"],
+            "weighted_f1_weighted_mean": result["weighted_f1"],
+            "evaluated_slides": result["n_test_slides"],
+        }
+
+    return {
+        "label_keys": list(label_keys),
+        "classification_metrics_by_label_key": metrics_by_label_key,
+    }
 
 
 def accumulate_classification_results(

@@ -7,7 +7,7 @@ args:
   lr: 0.001
   edge_attr_mode: adjacency
   cache_scores: true
-  sketch_mode: edge
+  sketch_mode: node
   node_score_mode: source_mean
   mog_args:
     retention_ratio: 0.1

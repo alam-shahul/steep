@@ -1,0 +1,6 @@
+type: steep.sketcher.RandomEdgeSketcher
+
+args:
+  retention_ratio: 0.1
+  random_seed: 0
+  cache_scores: true

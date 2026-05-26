@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 import torch
 
+import steep.utils._classification as classification_utils
+from steep.utils._classification import evaluate_split_classification, summarize_split_classification_scores
 from steep.utils._cluster import (
     LabelMetricStore,
     accumulate_label_results,
@@ -182,3 +184,139 @@ def test_extract_slide_embedding_records_returns_expected_fields(tmp_path: Path)
     assert record.slide_name == "slide.h5ad"
     assert record.embeddings.shape == (3, 1)
     assert record.labels_by_key["cell_type"].tolist() == ["a", "b", "a"]
+
+
+def test_evaluate_split_classification_scores_test_slides_and_saves_confusion_matrix(tmp_path: Path):
+    train_records = [
+        SimpleNamespace(
+            embeddings=np.array([[0.0], [0.1], [10.0], [10.1]], dtype=np.float32),
+            labels_by_key={"cell_type": np.array(["a", "a", "b", "b"], dtype=object)},
+        ),
+    ]
+    test_records = [
+        SimpleNamespace(
+            embeddings=np.array([[0.2], [10.2], [20.0]], dtype=np.float32),
+            labels_by_key={"cell_type": np.array(["a", "b", "c"], dtype=object)},
+        ),
+    ]
+
+    results = evaluate_split_classification(
+        train_records=train_records,
+        test_records=test_records,
+        label_keys=["cell_type"],
+        n_neighbors=1,
+        confusion_matrix_dir=tmp_path,
+        stage="baseline",
+    )
+
+    result = results["cell_type"]
+    assert result["accuracy"] == 1.0
+    assert result["count"] == 2
+    assert result["classifier"] == "KNeighborsClassifier"
+    assert result["classification_backend"] == "sklearn"
+    assert result["n_test_dropped_unknown_class"] == 1
+    assert result["split"] == "train_slide_test_slide"
+    assert Path(result["confusion_matrix_path"]).exists()
+
+
+def test_evaluate_split_classification_rapids_backend_encodes_labels(tmp_path: Path):
+    captured = {}
+
+    class FakeCuMLKNeighborsClassifier:
+        def __init__(self, n_neighbors, output_type):
+            captured["init"] = (n_neighbors, output_type)
+
+        def fit(self, X, y):
+            captured["fit_X_dtype"] = X.dtype
+            captured["fit_y"] = y.copy()
+            return self
+
+        def predict(self, X):
+            captured["predict_X_dtype"] = X.dtype
+            return np.array([0, 1], dtype=np.int32)
+
+    train_records = [
+        SimpleNamespace(
+            embeddings=np.array([[0.0], [0.1], [10.0], [10.1]], dtype=np.float64),
+            labels_by_key={"cell_type": np.array(["a", "a", "b", "b"], dtype=object)},
+        ),
+    ]
+    test_records = [
+        SimpleNamespace(
+            embeddings=np.array([[0.2], [10.2]], dtype=np.float64),
+            labels_by_key={"cell_type": np.array(["a", "b"], dtype=object)},
+        ),
+    ]
+    fake_cuml = SimpleNamespace(neighbors=SimpleNamespace(KNeighborsClassifier=FakeCuMLKNeighborsClassifier))
+
+    with patch.dict(sys.modules, {"cuml": fake_cuml, "cuml.neighbors": fake_cuml.neighbors}):
+        results = evaluate_split_classification(
+            train_records=train_records,
+            test_records=test_records,
+            label_keys=["cell_type"],
+            n_neighbors=1,
+            confusion_matrix_dir=tmp_path,
+            stage="baseline",
+            backend="rapids",
+        )
+
+    result = results["cell_type"]
+    assert captured["init"] == (1, "numpy")
+    assert captured["fit_X_dtype"] == np.float32
+    assert captured["predict_X_dtype"] == np.float32
+    assert np.issubdtype(captured["fit_y"].dtype, np.integer)
+    assert result["accuracy"] == 1.0
+    assert result["classifier"] == "CuMLKNeighborsClassifier"
+    assert result["classification_backend"] == "rapids"
+    assert Path(result["confusion_matrix_path"]).exists()
+
+
+def test_evaluate_split_classification_skips_large_confusion_matrix(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(classification_utils, "MAX_CONFUSION_MATRIX_CLASSES", 2)
+    train_records = [
+        SimpleNamespace(
+            embeddings=np.array([[float(idx)] for idx in range(6)], dtype=np.float32),
+            labels_by_key={"cell_type": np.array(["a", "a", "b", "b", "c", "c"], dtype=object)},
+        ),
+    ]
+    test_records = [
+        SimpleNamespace(
+            embeddings=np.array([[0.1], [2.1], [4.1]], dtype=np.float32),
+            labels_by_key={"cell_type": np.array(["a", "b", "c"], dtype=object)},
+        ),
+    ]
+
+    results = evaluate_split_classification(
+        train_records=train_records,
+        test_records=test_records,
+        label_keys=["cell_type"],
+        n_neighbors=1,
+        confusion_matrix_dir=tmp_path,
+        stage="baseline",
+    )
+
+    result = results["cell_type"]
+    assert result["confusion_matrix_path"] is None
+    assert not list(tmp_path.glob("*.png"))
+
+
+def test_summarize_split_classification_scores_preserves_metadata():
+    summary = summarize_split_classification_scores(
+        ["cell_type"],
+        {
+            "cell_type": {
+                "accuracy": 0.5,
+                "macro_f1": 0.4,
+                "weighted_f1": 0.45,
+                "count": 8,
+                "n_test_slides": 2,
+                "split": "train_slide_test_slide",
+            },
+        },
+    )
+
+    metrics = summary["classification_metrics_by_label_key"]["cell_type"]
+    assert metrics["accuracy_mean"] == 0.5
+    assert metrics["weighted_f1_weighted_mean"] == 0.45
+    assert metrics["evaluated_slides"] == 2
+    assert metrics["split"] == "train_slide_test_slide"

@@ -7,5 +7,6 @@ args:
   n_neighbors: 15
   leiden_resolution: 1.0
   clustering_backend: rapids
+  classification_backend: rapids
   resume_from_checkpoint: true
   run_wandb: false
