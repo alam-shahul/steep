@@ -1,192 +1,80 @@
-from typing import Callable, Tuple, Union
-
+import networkit as nk
 import networkx as nx
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_geometric.transforms as T
-from torch import Tensor
 from torch.distributions.normal import Normal
-from torch.nn import Linear, Parameter, ReLU, Sequential
-from torch_geometric.nn import global_mean_pool, graclus, max_pool, max_pool_x
-from torch_geometric.nn.conv import MessagePassing
-from torch_geometric.nn.dense.linear import Linear
-from torch_geometric.nn.inits import reset, zeros
-from torch_geometric.typing import Adj, OptPairTensor, OptTensor, Size
-from torch_geometric.utils import normalized_cut
+from torch_geometric.utils import softmax
 
-try:
-    import networkit as nk
-except ImportError:
-    nk = None
+eps = 1e-8
 
 
-class BinaryStep(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input):
-        # Save input for custom backward
-        ctx.save_for_backward(input)
-        # Hard thresholding to {0,1}
-        return (input > 0.0).float()
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        # Custom gradient shaping around the threshold region
-        (input,) = ctx.saved_tensors
-        grad_input = grad_output.clone()
-        zero_index = torch.abs(input) > 1
-        middle_index = (torch.abs(input) <= 1) * (torch.abs(input) > 0.4)
-        additional = 2 - 4 * torch.abs(input)
-        additional[zero_index] = 0.0
-        additional[middle_index] = 0.4
-        return grad_input * additional
-
-
-# -----------------------------------------
-# Single sparsification learner (one expert)
-# Learns edge scores per node, then top-k per node
-# -----------------------------------------
-class SpLearner(nn.Module):
-    """Sparsification learner."""
-
-    def __init__(self, nlayers, in_dim, hidden, activation, k, weight=True, metric=None, processors=None):
-        super().__init__()
-
-        self.nlayers = nlayers
-        self.layers = nn.ModuleList()
-        # First layer maps concatenated node features (and optional edge features)
-        self.layers.append(nn.Linear(in_dim, hidden))
-        for _ in range(nlayers - 2):
-            self.layers.append(nn.Linear(hidden, hidden))
-        # Output single scalar score per edge
-        self.layers.append(nn.Linear(hidden, 1))
-
-        self.param_init()
-        self.activation = activation
-        self.k = k  # target sparsity ratio (per node)
-        self.weight = weight
-
-    def param_init(self):
-        # Xavier init for all linear layers
-        for layer in self.layers:
-            nn.init.xavier_uniform_(layer.weight)
-
-    def internal_forward(self, x):
-        # MLP over edge feature representation
-        for i, layer in enumerate(self.layers):
-            x = layer(x)
-            if i != self.nlayers - 1:
-                x = self.activation(x)
-        return x
-
-    def gumbel_softmax_sample(self, indices, values, temperature, training):
-        """Draw a sample from the Gumbel-Softmax distribution on a sparse edge
-        matrix."""
-        r = self.sample_gumble(values.shape)
-        if training:
-            values = torch.log(values) + r.to(indices.device)
-        else:
-            values = torch.log(values)
-        values /= temperature
-        y = torch.sparse_coo_tensor(indices=indices, values=values, requires_grad=True)
-        return torch.sparse.softmax(y, dim=1)
-
-    def sample_gumble(self, shape, eps=1e-8):
-        """Sample from Gumbel(0, 1)"""
-        U = torch.rand(shape)
-        return -torch.log(-torch.log(U + eps) + eps)
-
-    def forward(self, features, indices, values=None, temperature=0, training=False):
-        # features: [num_nodes, in_dim_node]
-        # indices: [2, num_edges] (source/target indices)
-        # values: optional edge features
-
-        # Gather endpoint features for each edge
-        f1_features = torch.index_select(features, 0, indices[0, :])
-        f2_features = torch.index_select(features, 0, indices[1, :])
-
-        # Concatenate node features (and edge features if provided)
-        if values is not None:
-            auv = values
-            temp = torch.cat([f1_features, f2_features, auv], -1)
-        else:
-            temp = torch.cat([f1_features, f2_features], -1)
-
-        # Edge-wise score before normalization
-        temp = self.internal_forward(temp)
-
-        # Flatten to 1D scores per edge and normalize globally
-        z = torch.reshape(temp, [-1])
-        z = F.normalize(z, dim=0)
-
-        # Build sparse matrix of scores per edge
-        z_matrix = torch.sparse_coo_tensor(indices=indices, values=z, requires_grad=True)
-        # Normalize per-row (per source node) into a distribution
-        pi = torch.sparse.softmax(z_matrix, dim=1)
-        pi_values = pi.coalesce().values()
-        sparse_indices = pi.coalesce().indices()
-        sparse_values = pi.coalesce().values()
-
-        # Compute number of edges per node (row)
-        node_idx, num_edges_per_node = sparse_indices[0].unique(return_counts=True)
-        # Desired number of kept edges per node via ratio k
-        k_edges_per_node = (num_edges_per_node.float() * self.k).round().long()
-        k_edges_per_node = torch.where(
-            k_edges_per_node > 0,
-            k_edges_per_node,
-            torch.ones_like(k_edges_per_node, device=k_edges_per_node.device),
-        )
-
-        # Sort probs globally but keep node grouping information
-        sparse_values, val_sort_idx = sparse_values.sort(descending=True)
-        sparse_idx0 = sparse_indices[0].index_select(dim=-1, index=val_sort_idx)
-        idx_sort_idx = sparse_idx0.argsort(stable=True, dim=-1, descending=False)
-        scores_sorted = sparse_values.index_select(dim=-1, index=idx_sort_idx)
-
-        # For each node: compute index of threshold score
-        edge_start_indices = torch.cat(
-            (torch.tensor([0], device=pi.device), torch.cumsum(num_edges_per_node[:-1], dim=0)),
-        )
-        edge_end_indices = torch.abs(torch.add(edge_start_indices, k_edges_per_node) - 1).long()
-        node_keep_thre_cal = torch.index_select(scores_sorted, dim=-1, index=edge_end_indices)
-        # Broadcast threshold to all edges
-        node_keep_thre_augmented = node_keep_thre_cal.repeat_interleave(num_edges_per_node)
-
-        # BinaryStep to get hard 0/1 mask of edges above threshold
-        mask = BinaryStep.apply(scores_sorted - node_keep_thre_augmented + 1e-15)
-        masked_scores = mask * scores_sorted
-
-        # Restore original edge ordering
-        idx_resort_idx = idx_sort_idx.argsort()
-        val_resort_idx = val_sort_idx.argsort()
-        masked_scores = masked_scores.index_select(dim=-1, index=idx_resort_idx)
-        masked_scores = masked_scores.index_select(dim=-1, index=val_resort_idx)
-        return masked_scores
-
-    def write_tensor(self, x, msg):
-        # Helper to dump tensor to disk for debugging
-        with open("temp.txt", "w+") as log_file:
-            log_file.write(msg)
-            np.savetxt(log_file, x.cpu().detach().numpy())
-
-
-# ---------------------------------------------------------
-# Mixture-of-Experts over edges: per-node gating + experts
-# Each expert is a SpLearner producing edge scores/masks
-# ---------------------------------------------------------
-class MoE(nn.Module):
-    """Sparsely gated mixture of experts layer.
-
-    Each expert is a SpLearner that outputs edge scores. The gating network
-    assigns each node to k experts.
-
-    """
-
+class MoG(nn.Module):
     def __init__(
         self,
-        in_dim,
-        emb_dim,
+        num_features: int | None = None,
+        device: torch.device | None = None,
+        k_list=None,
+        hidden_spl: int | None = None,
+        num_layers_spl: int | None = None,
+        expert_select: int | None = None,
+        lam: float = 1.0,
+        topo_loss_coef: float = 1.0,
+        expr_loss_coef: float = 0.1,
+        retention_ratio: float | None = None,
+        expr_aug_coef: float = 0.0,
+        expr_topo_mode: str = "both",  # "none" / "intra" / "inter" / "both"
+        in_dim: int | None = None,
+        args: dict | None = None,
+        params: dict | None = None,
+        **_,
+    ):
+        super().__init__()
+
+        model_args = dict(params or args or {})
+        if num_features is None:
+            num_features = in_dim
+        if k_list is None:
+            k_list = model_args["k_list"]
+        if hidden_spl is None:
+            hidden_spl = model_args["hidden_spl"]
+        if num_layers_spl is None:
+            num_layers_spl = model_args["num_layers_spl"]
+        if expert_select is None:
+            expert_select = model_args["expert_select"]
+
+        lam = model_args.get("lam", lam)
+        topo_loss_coef = model_args.get("topo_loss_coef", topo_loss_coef)
+        expr_loss_coef = model_args.get("expr_loss_coef", expr_loss_coef)
+        retention_ratio = model_args.get("retention_ratio", retention_ratio)
+        expr_aug_coef = model_args.get("expr_aug_coef", expr_aug_coef)
+        expr_topo_mode = model_args.get("expr_topo_mode", expr_topo_mode)
+
+        self.device = device
+        self.k_list = torch.tensor(k_list, device=device, dtype=torch.float32)
+
+        self.learner = MoE(
+            input_size=num_features,
+            hidden_size=hidden_spl,
+            num_experts=self.k_list.size(0),
+            nlayers=num_layers_spl,
+            activation=nn.ReLU(),
+            k_list=self.k_list,
+            expert_select=expert_select,
+            lam=lam,
+            topo_loss_coef=topo_loss_coef,
+            expr_loss_coef=expr_loss_coef,
+            retention_ratio=retention_ratio,
+            expr_aug_coef=expr_aug_coef,
+            expr_topo_mode=expr_topo_mode,
+        )
+
+
+class MoE(nn.Module):
+    def __init__(
+        self,
+        input_size,
         hidden_size,
         num_experts,
         nlayers,
@@ -195,514 +83,456 @@ class MoE(nn.Module):
         expert_select,
         noisy_gating=True,
         coef=1e-2,
-        edge_dim=1,
-        lam=0.1,
-        topo_loss_coef=0.0,
-        expr_loss_coef=0.0,
+        lam=1.0,
+        topo_loss_coef=1.0,
+        expr_loss_coef=0.1,
+        retention_ratio=None,
         expr_aug_coef=0.0,
-        expr_topo_mode="both",
+        expr_topo_mode: str = "both",
     ):
         super().__init__()
+
         self.noisy_gating = noisy_gating
         self.num_experts = num_experts
-        self.k = expert_select  # how many experts a node uses
+        self.k = expert_select
         self.loss_coef = coef
         self.k_list = k_list
-        self.emb_dim = emb_dim
-        self.num_experts = num_experts
 
-        # Instantiate experts; each expert sees [x_i, x_j, edge_attr]
+        k_list_python = k_list.detach().cpu().tolist()
         self.experts = nn.ModuleList(
             [
                 SpLearner(
                     nlayers=nlayers,
-                    in_dim=in_dim * 2 + edge_dim,
+                    in_dim=input_size * 2 + 1,
                     hidden=hidden_size,
                     activation=activation,
-                    k=k,
+                    k=float(k),
                 )
-                for k in k_list
+                for k in k_list_python
             ],
         )
 
-        # Gating network weights: node features -> logits over experts
-        self.w_gate = nn.Parameter(torch.zeros(in_dim, num_experts), requires_grad=True)
-        self.w_noise = nn.Parameter(torch.zeros(in_dim, num_experts), requires_grad=True)
+        self.w_gate = nn.Parameter(torch.zeros(input_size, num_experts), requires_grad=True)
+        self.w_noise = nn.Parameter(torch.zeros(input_size, num_experts), requires_grad=True)
 
-        # Optional topological edge scores (LocalDegree, ForestFire, etc.)
-        self.topo_val = None
-        self.expr_prior = None
-        self.lam = lam
+        self.lam = float(lam)
         self.topo_loss_coef = float(topo_loss_coef)
         self.expr_loss_coef = float(expr_loss_coef)
+        self.retention_ratio = retention_ratio
         self.expr_aug_coef = float(expr_aug_coef)
         self.expr_topo_mode = expr_topo_mode
 
+        self.topo_val = None
+        self.expr_prior = None
+
         self.softplus = nn.Softplus()
         self.softmax = nn.Softmax(1)
+
         self.register_buffer("mean", torch.tensor([0.0]))
         self.register_buffer("std", torch.tensor([1.0]))
+
         assert self.k <= self.num_experts
 
-    def _normalized_mse(self, values, target):
-        values = values.float()
-        target = target.to(device=values.device, dtype=values.dtype)
-        values = (values - values.min()) / (values.max() - values.min() + 1e-12)
-        target = (target - target.min()) / (target.max() - target.min() + 1e-12)
-        return F.mse_loss(values, target)
+        if retention_ratio is not None:
+            if not (0 < float(retention_ratio) <= 1):
+                raise ValueError(f"retention_ratio must be in (0, 1], got {retention_ratio}")
 
-    def cv_squared(self, x):
-        """Squared coefficient of variation, used as load-balancing loss."""
-        eps = 1e-10
-        if x.shape[0] == 1:
-            return torch.tensor([0], device=x.device, dtype=x.dtype)
-        return x.float().var() / (x.float().mean() ** 2 + eps)
+        if expr_topo_mode not in {"none", "intra", "inter", "both"}:
+            raise ValueError(f"Unsupported expr_topo_mode: {expr_topo_mode}")
 
-    def _gates_to_load(self, gates):
-        """Load per expert = number of nodes that picked this expert."""
-        return (gates > 0).sum(0)
-
-    def _prob_in_top_k(self, clean_values, noisy_values, noise_stddev, noisy_top_values):
-        """Backprop-friendly probability of being in top-k under noisy
-        gating."""
-        batch = clean_values.size(0)
-        m = noisy_top_values.size(1)
-        top_values_flat = noisy_top_values.flatten()
-
-        threshold_positions_if_in = torch.arange(batch, device=clean_values.device) * m + self.k
-        threshold_if_in = torch.unsqueeze(torch.gather(top_values_flat, 0, threshold_positions_if_in), 1)
-        is_in = torch.gt(noisy_values, threshold_if_in)
-        threshold_positions_if_out = threshold_positions_if_in - 1
-        threshold_if_out = torch.unsqueeze(torch.gather(top_values_flat, 0, threshold_positions_if_out), 1)
-
-        normal = Normal(self.mean, self.std)
-        prob_if_in = normal.cdf((clean_values - threshold_if_in) / noise_stddev)
-        prob_if_out = normal.cdf((clean_values - threshold_if_out) / noise_stddev)
-        prob = torch.where(is_in, prob_if_in, prob_if_out)
-        return prob
-
-    def noisy_top_k_gating(self, x, edge_index, train, noise_epsilon=1e-1):
-        """Noisy top-k gating (Shazeer et al.
-
-        2017). Returns node->expert gates.
-
-        """
-        # Node-level logits over experts
-        clean_logits = x @ self.w_gate  # [num_nodes, num_experts]
-
-        if self.noisy_gating and train:
-            # Add data-dependent Gaussian noise to logits
-            raw_noise_stddev = x @ self.w_noise
-            noise_stddev = self.softplus(raw_noise_stddev) + noise_epsilon
-            noisy_logits = clean_logits + (torch.randn_like(clean_logits) * noise_stddev)
-            logits = noisy_logits
-        else:
-            logits = clean_logits
-
-        # Take top-(k+1) logits per node
-        top_logits, top_indices = logits.topk(min(self.k + 1, self.num_experts), dim=1)
-        top_k_logits = top_logits[:, : self.k]  # [num_nodes, k]
-        top_k_indices = top_indices[:, : self.k]  # [num_nodes, k]
-
-        # Softmax over selected experts, then scatter back to full expert dim
-        top_k_gates = self.softmax(top_k_logits)
-        zeros = torch.zeros_like(logits, requires_grad=True)
-        gates = zeros.scatter(1, top_k_indices, top_k_gates)  # [num_nodes, num_experts]
-
-        # Expected load (for regularization)
-        if self.noisy_gating and self.k < self.num_experts and train:
-            load = (self._prob_in_top_k(clean_logits, noisy_logits, noise_stddev, top_logits)).sum(0)
-        else:
-            load = self._gates_to_load(gates)
-        return gates, load
-
-    def forward(self, x, edge_index, temp, edge_attr=None, training=False):
-        """Compute per-edge sparsification mask and MoE load-balancing loss."""
-        if edge_attr is not None and edge_attr.dim() == 1:
-            edge_attr = edge_attr.view(-1, 1)
-
-        # Node-level expert gates: [num_nodes, num_experts]
-        node_gates, load = self.noisy_top_k_gating(x, edge_index, self.training)
-
-        # Load-balancing loss: encourage uniform usage over experts
-        importance = node_gates.sum(0)
-        loss_balance = self.cv_squared(importance) + self.cv_squared(load)
-        loss_balance *= self.loss_coef
-        self.importance = node_gates.mean(0)
-        self.load = load
-
-        # Convert node-level gates to edge-level gates using source node index
-        edge_gates = torch.index_select(node_gates, dim=0, index=edge_index[0])  # [num_edges, num_experts]
-
-        # Run each expert to get per-edge scores
-        expert_outputs = []
-        for i in range(self.num_experts):
-            expert_i_output = self.experts[i](x, edge_index, edge_attr, temp, training)  # [num_edges]
-            if self.topo_val is not None:
-                # Optionally blend in topological scores
-                expert_i_output = expert_i_output * self.lam + self.topo_val[:, i % 4]
-            expert_outputs.append(expert_i_output)
-
-        # Stack experts: [num_edges, num_experts]
-        expert_outputs = torch.stack(expert_outputs, dim=1)
-
-        # Mixture: weighted average over experts per edge
-        gated_output = edge_gates * expert_outputs
-        gated_output = gated_output.mean(dim=1)  # [num_edges]
-
-        # Per-node top-k edges based on mixture scores
-        node_idx, num_edges_per_node = edge_index[0].unique(return_counts=True)
-        k_per_node = torch.sum(node_gates * torch.unsqueeze(self.k_list, 0), dim=1)
-        k_per_node = k_per_node.index_select(dim=0, index=node_idx)
-        k_edges_per_node = (k_per_node * num_edges_per_node).round().long()
-        k_edges_per_node = torch.where(
-            k_edges_per_node > 0,
-            k_edges_per_node,
-            torch.ones_like(k_edges_per_node, device=k_edges_per_node.device),
-        )
-
-        # Global sort and grouping by source node
-        sparse_values, val_sort_idx = gated_output.sort(descending=True)
-        sparse_idx0 = edge_index[0].index_select(dim=-1, index=val_sort_idx)
-        idx_sort_idx = sparse_idx0.argsort(stable=True, dim=-1, descending=False)
-        scores_sorted = sparse_values.index_select(dim=-1, index=idx_sort_idx)
-
-        # Node-specific thresholds
-        edge_start_indices = torch.cat(
-            (torch.tensor([0], device=edge_index.device), torch.cumsum(num_edges_per_node[:-1], dim=0)),
-        )
-        edge_end_indices = torch.abs(torch.add(edge_start_indices, k_edges_per_node) - 1).long()
-        node_keep_thre_cal = torch.index_select(scores_sorted, dim=-1, index=edge_end_indices)
-        node_keep_thre_augmented = node_keep_thre_cal.repeat_interleave(num_edges_per_node)
-
-        # BinaryStep to get hard {0,1} edge mask
-        mask = BinaryStep.apply(scores_sorted - node_keep_thre_augmented + 1e-12)
-
-        # Restore original edge order
-        idx_resort_idx = idx_sort_idx.argsort()
-        val_resort_idx = val_sort_idx.argsort()
-        mask = mask.index_select(dim=-1, index=idx_resort_idx)
-        mask = mask.index_select(dim=-1, index=val_resort_idx)
-
-        # Cache per-node stats
-        self.num_edges_per_node = num_edges_per_node
-        self.k_edges_per_node = k_edges_per_node
-        self.k_per_node = k_per_node
-
-        zero = gated_output.new_tensor(0.0)
-        loss_topo = zero
-        if self.topo_val is not None and self.topo_loss_coef > 0 and self.expr_topo_mode in {"both", "topo"}:
-            topo_prior = self.topo_val.mean(dim=1)
-            loss_topo = self._normalized_mse(gated_output, topo_prior) * self.topo_loss_coef
-
-        loss_expr = zero
-        if self.expr_prior is not None and self.expr_loss_coef > 0 and self.expr_topo_mode in {"both", "expr"}:
-            loss_expr = self._normalized_mse(gated_output, self.expr_prior) * self.expr_loss_coef
-
-        loss = loss_balance + loss_topo + loss_expr
-
-        return {
-            "edge_score": gated_output,
-            "edge_mask": mask,
-            "loss": loss,
-            "loss_balance": loss_balance,
-            "loss_topo": loss_topo,
-            "loss_expr": loss_expr,
-        }
+    @staticmethod
+    def _minmax_by_col(tensor):
+        min_val = tensor.min(dim=0, keepdim=True).values
+        max_val = tensor.max(dim=0, keepdim=True).values
+        return (tensor - min_val) / (max_val - min_val + eps)
 
     def get_topo_val(self, edge_index):
-        """Compute 4 networkit-based topological scores for each edge."""
-        if nk is None:
-            raise ImportError("MoG topology scores require networkit. Install networkit or set use_topo=false.")
-
         G = nx.DiGraph()
         edges = edge_index.t().tolist()
         G.add_edges_from(edges)
+
         G = nk.nxadapter.nx2nk(G)
         G.indexEdges()
 
-        # A set of sparsification scores per edge
         lds = nk.sparsification.LocalDegreeScore(G).run().scores()
         ffs = nk.sparsification.ForestFireScore(G, 0.6, 5.0).run().scores()
         triangles = nk.sparsification.TriangleEdgeScore(G).run().scores()
         lss = nk.sparsification.LocalSimilarityScore(G, triangles).run().scores()
         scan = nk.sparsification.SCANStructuralSimilarityScore(G, triangles).run().scores()
 
-        topo_val = torch.tensor([lds, ffs, lss, scan], device=edge_index.device).t()
-        normalized_features = F.normalize(topo_val, dim=0)
-        self.topo_val = normalized_features
+        topo_val = torch.tensor([lds, ffs, lss, scan], device=edge_index.device).t().float()
+        topo_val = self._minmax_by_col(topo_val)
 
+        self.topo_val = topo_val
 
-# -------------------------------------------------
-# High-level model container:
-#   - MoE learner produces edge mask
-#   - Net is the downstream GNN
-# -------------------------------------------------
-class MoG(nn.Module):
-    def __init__(
-        self,
-        num_features=None,
-        device=None,
-        k_list=None,
-        hidden_spl=None,
-        num_layers_spl=None,
-        expert_select=None,
-        lam=1.0,
-        topo_loss_coef=0.0,
-        expr_loss_coef=0.0,
-        retention_ratio=None,
-        expr_aug_coef=0.0,
-        expr_topo_mode="both",
-        in_dim=None,
-        emb_dim=None,
-        out_channels=None,
-        edge_dim=1,
-        args=None,
-        params=None,
-    ):
-        super().__init__()
+    def _build_expr_topo_target(self, x):
+        """Build one merged expression-aware topology target per edge.
 
-        if args is not None:
-            model_args = dict(args)
-            num_features = in_dim if in_dim is not None else num_features
+        Returns:
+            prior_target: [num_edges], or None
+
+        """
+        if self.topo_val is None:
+            return None
+
+        topo = self.topo_val.to(device=x.device, dtype=x.dtype)
+
+        if self.expr_topo_mode == "none" or self.expr_prior is None:
+            prior_features = topo
+
         else:
-            model_args = {
-                "k_list": k_list,
-                "hidden_spl": hidden_spl,
-                "num_layers_spl": num_layers_spl,
-                "expert_select": expert_select,
-                "lam": lam,
-                "topo_loss_coef": topo_loss_coef,
-                "expr_loss_coef": expr_loss_coef,
-                "retention_ratio": retention_ratio,
-                "expr_aug_coef": expr_aug_coef,
-                "expr_topo_mode": expr_topo_mode,
-            }
+            expr = self.expr_prior.to(device=x.device, dtype=x.dtype).clamp(0.0, 1.0)
 
-        in_dim = num_features if num_features is not None else in_dim
-        emb_dim = emb_dim if emb_dim is not None else model_args["hidden_spl"]
-        out_channels = out_channels if out_channels is not None else in_dim
-        model_args.setdefault("lam", 1.0)
-        model_args.setdefault("topo_loss_coef", 0.0)
-        model_args.setdefault("expr_loss_coef", 0.0)
-        model_args.setdefault("expr_aug_coef", 0.0)
-        model_args.setdefault("expr_topo_mode", "both")
+            if self.expr_topo_mode == "intra":
+                prior_features = topo * expr.unsqueeze(1)
 
-        self.args = model_args
-        self.device = device
-        self.k_list = torch.tensor(model_args["k_list"], device=device)
+            elif self.expr_topo_mode == "inter":
+                prior_features = topo * (1.0 - expr).unsqueeze(1)
 
-        # MoE-based sparsification learner
-        self.learner = MoE(
-            in_dim=in_dim,
-            emb_dim=emb_dim,
-            hidden_size=model_args["hidden_spl"],
-            num_experts=self.k_list.size(0),
-            nlayers=model_args["num_layers_spl"],
-            activation=nn.ReLU(),
-            k_list=self.k_list,
-            expert_select=model_args["expert_select"],
-            edge_dim=edge_dim,
-            lam=model_args["lam"],
-            topo_loss_coef=model_args.get("topo_loss_coef", 0.0),
-            expr_loss_coef=model_args.get("expr_loss_coef", 0.0),
-            expr_aug_coef=model_args.get("expr_aug_coef", 0.0),
-            expr_topo_mode=model_args.get("expr_topo_mode", "both"),
-        )
+            elif self.expr_topo_mode == "both":
+                prior_features = torch.cat(
+                    [
+                        topo * expr.unsqueeze(1),
+                        topo * (1.0 - expr).unsqueeze(1),
+                    ],
+                    dim=1,
+                )
 
-        # Task GNN (NNConv + pooling)
-        self.gnn = Net(in_dim=in_dim, out_dim=out_channels)
+            else:
+                raise ValueError(f"Unsupported expr_topo_mode: {self.expr_topo_mode}")
 
+        prior_target = prior_features.mean(dim=1)
+        prior_target = prior_target.clamp(0.0, 1.0)
+        return prior_target
 
-# -------------------------------
-# Utilities for GNN backbone
-# -------------------------------
-def normalized_cut_2d(edge_index, pos):
-    # Edge weights = Euclidean distance between endpoints in pos
-    row, col = edge_index
-    edge_attr = torch.norm(pos[row] - pos[col], p=2, dim=1)
-    return normalized_cut(edge_index, edge_attr, num_nodes=pos.size(0))
+    def cv_squared(self, x):
+        eps_local = 1e-10
+        if x.shape[0] == 1:
+            return torch.tensor([0], device=x.device, dtype=x.dtype)
+        return x.float().var() / (x.float().mean() ** 2 + eps_local)
 
+    def _gates_to_load(self, gates):
+        return (gates > 0).sum(0)
 
-# ---------------------------
-# GNN backbone using NNConv
-# ---------------------------
-class Net(torch.nn.Module):
-    def __init__(self, in_dim=32, out_dim=32):
-        super().__init__()
-        # Edge network for first NNConv (2-dim edge_attr -> in_dim*32 weights)
-        nn1 = Sequential(
-            Linear(2, 25),
-            ReLU(),
-            Linear(25, in_dim * 32),
-        )
-        self.conv1 = NNConv(in_dim, 32, nn1, aggr="max")
+    def _prob_in_top_k(self, clean_values, noisy_values, noise_stddev, noisy_top_values):
+        batch = clean_values.size(0)
+        m = noisy_top_values.size(1)
+        top_values_flat = noisy_top_values.flatten()
 
-        # Edge network for second NNConv (2-dim edge_attr -> 32*64 weights)
-        nn2 = Sequential(
-            Linear(2, 25),
-            ReLU(),
-            Linear(25, 32 * 64),
-        )
-        self.conv2 = NNConv(32, 64, nn2, aggr="max")
+        threshold_positions_if_in = torch.arange(batch, device=clean_values.device) * m + self.k
+        threshold_if_in = torch.unsqueeze(torch.gather(top_values_flat, 0, threshold_positions_if_in), 1)
 
-        # Final MLP head
-        self.fc1 = torch.nn.Linear(64, 128)
-        self.fc2 = torch.nn.Linear(128, out_dim)
+        is_in = torch.gt(noisy_values, threshold_if_in)
 
-        # Cartesian coordinates as new edge_attr after pooling
-        self.transform = T.Cartesian(cat=False)
+        threshold_positions_if_out = threshold_positions_if_in - 1
+        threshold_if_out = torch.unsqueeze(torch.gather(top_values_flat, 0, threshold_positions_if_out), 1)
 
-    def forward(self, data, mask=None):
-        # First NNConv + nonlinearity, optionally masked edges
-        data.x = F.elu(self.conv1(data.x, data.edge_index, data.edge_attr, edge_mask=mask))
+        normal = Normal(self.mean, self.std)
+        prob_if_in = normal.cdf((clean_values - threshold_if_in) / noise_stddev)
+        prob_if_out = normal.cdf((clean_values - threshold_if_out) / noise_stddev)
 
-        # Graclus pooling with normalized-cut weights
-        weight = normalized_cut_2d(data.edge_index, data.pos)
-        cluster = graclus(data.edge_index, weight, data.x.size(0))
-        data.edge_attr = None
-        data = max_pool(cluster, data, transform=self.transform)
+        return torch.where(is_in, prob_if_in, prob_if_out)
 
-        # Second NNConv + nonlinearity on pooled graph
-        data.x = F.elu(self.conv2(data.x, data.edge_index, data.edge_attr, edge_mask=mask))
+    def noisy_top_k_gating(self, x, train, noise_epsilon=1e-2):
+        clean_logits = x @ self.w_gate
 
-        # Second level of pooling
-        weight = normalized_cut_2d(data.edge_index, data.pos)
-        cluster = graclus(data.edge_index, weight, data.x.size(0))
-        x, batch = max_pool_x(cluster, data.x, data.batch)
+        if self.noisy_gating and train:
+            raw_noise_stddev = x @ self.w_noise
+            noise_stddev = self.softplus(raw_noise_stddev) + noise_epsilon
+            noisy_logits = clean_logits + torch.randn_like(clean_logits) * noise_stddev
+            logits = noisy_logits
+        else:
+            logits = clean_logits
 
-        # Global pooling + MLP classifier
-        x = global_mean_pool(x, batch)
-        x = F.elu(self.fc1(x))
-        x = F.dropout(x, training=self.training)
-        return F.log_softmax(self.fc2(x), dim=1)
+        top_logits, top_indices = logits.topk(min(self.k + 1, self.num_experts), dim=1)
 
+        top_k_logits = top_logits[:, : self.k]
+        top_k_indices = top_indices[:, : self.k]
+        top_k_gates = self.softmax(top_k_logits)
 
-class NNConv(MessagePassing):
-    r"""The continuous kernel-based convolutional operator from the
-    `"Neural Message Passing for Quantum Chemistry"
-    <https://arxiv.org/abs/1704.01212>`_ paper.
+        zeros = torch.zeros_like(logits, requires_grad=True)
+        gates = zeros.scatter(1, top_k_indices, top_k_gates)
 
-    This convolution is also known as the edge-conditioned convolution from the
-    `"Dynamic Edge-Conditioned Filters in Convolutional Neural Networks on
-    Graphs" <https://arxiv.org/abs/1704.02901>`_ paper (see
-    :class:`torch_geometric.nn.conv.ECConv` for an alias):
+        if self.noisy_gating and self.k < self.num_experts and train:
+            load = self._prob_in_top_k(
+                clean_logits,
+                noisy_logits,
+                noise_stddev,
+                top_logits,
+            ).sum(0)
+        else:
+            load = self._gates_to_load(gates)
 
-    .. math::
-        \mathbf{x}^{\prime}_i = \mathbf{\Theta} \mathbf{x}_i +
-        \sum_{j \in \mathcal{N}(i)} \mathbf{x}_j \cdot
-        h_{\mathbf{\Theta}}(\mathbf{e}_{i,j}),
+        return gates, load
 
-    where :math:`h_{\mathbf{\Theta}}` denotes a neural network, i.e. an MLP.
+    def _group_topk_mask(self, scores, src_index, keep_counts):
+        num_edges = scores.numel()
+        if num_edges == 0:
+            return torch.zeros_like(scores)
 
-    Args:
-        in_channels (int or tuple): Size of each input sample, or :obj:`-1` to
-            derive the size from the first input(s) to the forward method.
-            A tuple corresponds to the sizes of source and target
-            dimensionalities.
-        out_channels (int): Size of each output sample.
-        nn (torch.nn.Module): A neural network :math:`h_{\mathbf{\Theta}}` that
-            maps edge features :obj:`edge_attr` of shape :obj:`[-1,
-            num_edge_features]` to shape
-            :obj:`[-1, in_channels * out_channels]`.
-        aggr (str, optional): Aggregation scheme (:obj:`"add"`, :obj:`"mean"`,
-            :obj:`"max"`). (default: :obj:`"add"`)
-        root_weight (bool, optional): If :obj:`False`, transformed root node
-            features are not added. (default: :obj:`True`)
-        bias (bool, optional): If :obj:`False`, no additive bias is learned.
-            (default: :obj:`True`)
-    """
+        score_perm = torch.argsort(scores, descending=True, stable=True)
+        src_by_score = src_index[score_perm]
+        group_perm = torch.argsort(src_by_score, stable=True)
+        perm = score_perm[group_perm]
+        src_sorted = src_index[perm]
 
-    def __init__(
-        self,
-        in_channels: Union[int, Tuple[int, int]],
-        out_channels: int,
-        nn: Callable,
-        aggr: str = "max",
-        root_weight: bool = True,
-        bias: bool = True,
-        **kwargs,
-    ):
-        super().__init__(aggr=aggr, **kwargs)
+        _, counts = torch.unique_consecutive(src_sorted, return_counts=True)
+        assert keep_counts.numel() == counts.numel()
 
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.nn = nn
-        self.root_weight = root_weight
+        group_starts = torch.cumsum(counts, dim=0) - counts
+        rank_in_group = torch.arange(num_edges, device=scores.device) - group_starts.repeat_interleave(counts)
+        keep_counts = torch.minimum(torch.clamp_min(keep_counts, 1), counts)
+        keep_per_edge = keep_counts.repeat_interleave(counts)
+        mask_sorted = (rank_in_group < keep_per_edge).to(scores.dtype)
 
-        if isinstance(in_channels, int):
-            in_channels = (in_channels, in_channels)
+        mask = torch.zeros_like(mask_sorted)
+        mask[perm] = mask_sorted
 
-        self.in_channels_l = in_channels[0]
+        return mask
 
-        if root_weight:
-            self.lin = Linear(
-                in_channels[1],
-                out_channels,
-                bias=False,
-                weight_initializer="uniform",
+    def _enforce_retention_ratio(self, scores, mask):
+        if self.retention_ratio is None:
+            return mask
+
+        num_edges = scores.numel()
+        if num_edges == 0:
+            return mask
+
+        target_keep = max(1, int(np.ceil(num_edges * float(self.retention_ratio))))
+        target_keep = min(target_keep, num_edges)
+
+        current_keep = int(mask.sum().item())
+        if current_keep == target_keep:
+            return mask
+
+        final_mask = torch.zeros_like(mask)
+
+        kept_idx = torch.nonzero(mask > 0, as_tuple=False).view(-1)
+        not_kept_idx = torch.nonzero(mask <= 0, as_tuple=False).view(-1)
+
+        if current_keep > target_keep:
+            keep_scores = scores[kept_idx]
+            chosen_local = torch.topk(keep_scores, k=target_keep, largest=True).indices
+            chosen_idx = kept_idx[chosen_local]
+            final_mask[chosen_idx] = 1.0
+            return final_mask
+
+        final_mask[kept_idx] = 1.0
+        need = target_keep - current_keep
+
+        if need > 0 and not_kept_idx.numel() > 0:
+            need = min(need, not_kept_idx.numel())
+            extra_scores = scores[not_kept_idx]
+            chosen_local = torch.topk(extra_scores, k=need, largest=True).indices
+            chosen_idx = not_kept_idx[chosen_local]
+            final_mask[chosen_idx] = 1.0
+
+        return final_mask
+
+    def forward(self, x, edge_index, temp, edge_attr=None, training=None):
+        num_edges = edge_index.size(1)
+        is_training = self.training if training is None else bool(training)
+
+        if self.topo_val is not None:
+            assert (
+                self.topo_val.size(0) == num_edges
+            ), f"topo_val has {self.topo_val.size(0)} edges, expected {num_edges}"
+
+        if self.expr_prior is not None:
+            assert (
+                self.expr_prior.size(0) == num_edges
+            ), f"expr_prior has {self.expr_prior.size(0)} edges, expected {num_edges}"
+
+        if edge_attr is None:
+            edge_attr = torch.ones(edge_index.size(1), device=x.device, dtype=x.dtype)
+        else:
+            edge_attr = edge_attr.to(device=x.device, dtype=x.dtype)
+
+        # --------------------------------------------------
+        # 1) node-level expert routing
+        # --------------------------------------------------
+        node_gates, load = self.noisy_top_k_gating(x, is_training)
+
+        importance = node_gates.sum(0)
+        loss_balance = self.cv_squared(importance) + self.cv_squared(load)
+        loss_balance = loss_balance * self.loss_coef
+
+        src = edge_index[0]
+        edge_gates = torch.index_select(node_gates, dim=0, index=src)
+
+        # --------------------------------------------------
+        # 2) expert edge scoring
+        # --------------------------------------------------
+        expert_probs = []
+        expert_masked_scores = []
+
+        for i in range(self.num_experts):
+            _, edge_prob_i, _, masked_scores_i = self.experts[i](
+                features=x,
+                indices=edge_index,
+                values=edge_attr,
+                temperature=temp,
+            )
+            expert_probs.append(edge_prob_i)
+            expert_masked_scores.append(masked_scores_i)
+
+        expert_probs = torch.stack(expert_probs, dim=1)
+        expert_masked_scores = torch.stack(expert_masked_scores, dim=1)
+
+        gated_prob = torch.sum(edge_gates * expert_probs, dim=1)
+        gated_masked_score = torch.sum(edge_gates * expert_masked_scores, dim=1)
+
+        # --------------------------------------------------
+        # 3) merged expression-aware topology prior loss
+        # --------------------------------------------------
+        prior_target = self._build_expr_topo_target(x)
+
+        if prior_target is not None:
+            loss_prior = F.mse_loss(gated_prob, prior_target)
+        else:
+            loss_prior = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+
+        # --------------------------------------------------
+        # 4) selection score
+        # --------------------------------------------------
+        selection_score = gated_masked_score.clone()
+
+        if prior_target is not None:
+            selection_score = selection_score + self.lam * prior_target
+
+        if self.expr_prior is not None and self.expr_aug_coef != 0.0:
+            selection_score = selection_score + self.expr_aug_coef * self.expr_prior.to(
+                device=x.device,
+                dtype=x.dtype,
             )
 
-        if bias:
-            self.bias = Parameter(torch.Tensor(out_channels))
-        else:
-            self.register_parameter("bias", None)
+        # --------------------------------------------------
+        # 5) local MoG mask per source node
+        # --------------------------------------------------
+        src_sorted_perm = torch.argsort(src, stable=True)
+        src_sorted = src[src_sorted_perm]
+        unique_src, num_edges_per_node = torch.unique_consecutive(src_sorted, return_counts=True)
 
-        self.reset_parameters()
+        k_per_node = torch.sum(node_gates * torch.unsqueeze(self.k_list, 0), dim=1)
+        k_edges_per_node = (k_per_node[unique_src] * num_edges_per_node.float()).round().long()
+        k_edges_per_node = torch.clamp(k_edges_per_node, min=1)
 
-    def reset_parameters(self):
-        super().reset_parameters()
-        reset(self.nn)
-        if self.root_weight:
-            self.lin.reset_parameters()
-        zeros(self.bias)
+        local_mask = self._group_topk_mask(
+            scores=selection_score,
+            src_index=src,
+            keep_counts=k_edges_per_node,
+        )
 
-    def forward(
-        self,
-        x: Union[Tensor, OptPairTensor],
-        edge_index: Adj,
-        edge_attr: OptTensor = None,
-        size: Size = None,
-        edge_mask=None,
-    ) -> Tensor:
-        # x: node features (or pair of source/target features)
-        # edge_mask: optional per-edge scalar used to down-weight messages
+        final_mask = self._enforce_retention_ratio(
+            scores=selection_score,
+            mask=local_mask,
+        )
 
-        if isinstance(x, Tensor):
-            x: OptPairTensor = (x, x)
+        total_loss = loss_balance + self.topo_loss_coef * loss_prior
 
-        # Store / register edge_mask
-        if isinstance(edge_mask, Tensor):
-            self.edge_mask = edge_mask
-        else:
-            self.register_parameter("edge_mask", None)
+        return {
+            "edge_mask": final_mask,
+            "mask": final_mask,
+            "local_mask": local_mask,
+            "edge_score": selection_score,
+            "gated_prob": gated_prob,
+            "loss": total_loss,
+            "loss_balance": loss_balance.detach(),
+            "loss_topo": loss_prior.detach(),
+            "loss_expr": torch.tensor(0.0, device=x.device).detach(),
+            "loss_prior": loss_prior.detach(),
+        }
 
-        # propagate_type: (x: OptPairTensor, edge_attr: OptTensor)
-        out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=size)
 
-        # Add transformed root node features if enabled
-        x_r = x[1]
-        if x_r is not None and self.root_weight:
-            out = out + self.lin(x_r)
+class SpLearner(nn.Module):
+    """Sparsification learner."""
 
-        # Add bias if present
-        if self.bias is not None:
-            out = out + self.bias
+    def __init__(self, nlayers, in_dim, hidden, activation, k, weight=True, metric=None, processors=None):
+        super().__init__()
 
-        return out
+        self.nlayers = nlayers
+        self.layers = nn.ModuleList()
 
-    def message(self, x_j: Tensor, edge_attr: Tensor) -> Tensor:
-        # Compute edge-conditioned weight matrices
-        weight = self.nn(edge_attr)
-        weight = weight.view(-1, self.in_channels_l, self.out_channels)
+        self.layers.append(nn.Linear(in_dim, hidden))
+        for _ in range(nlayers - 2):
+            self.layers.append(nn.Linear(hidden, hidden))
+        self.layers.append(nn.Linear(hidden, 1))
 
-        # Standard NNConv message: x_j * W(e_ij)
-        m = torch.matmul(x_j.unsqueeze(1), weight).squeeze(1)
+        self.param_init()
+        self.activation = activation
+        self.k = float(k)
+        self.weight = weight
 
-        # If edge_mask matches number of edges, modulate messages
-        if m.size(0) == self.edge_mask.size(0):
-            m = m * self.edge_mask.unsqueeze(1)
-        return m
+    def param_init(self):
+        for layer in self.layers:
+            nn.init.xavier_uniform_(layer.weight)
 
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}({self.in_channels}, " f"{self.out_channels}, aggr={self.aggr}, nn={self.nn})"
+    def internal_forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
+            if i != self.nlayers - 1:
+                x = self.activation(x)
+        return x
+
+    def sample_gumbel(self, shape, device):
+        U = torch.rand(shape, device=device)
+        return -torch.log(-torch.log(U + eps) + eps)
+
+    def gumbel_softmax_sample(self, logits, src_index, temperature):
+        if self.training:
+            logits = logits + self.sample_gumbel(logits.shape, logits.device)
+        logits = logits / temperature
+        return softmax(logits, src_index)
+
+    def _group_topk_mask(self, scores, src_index, ratio_k):
+        num_edges = scores.numel()
+        if num_edges == 0:
+            return torch.zeros_like(scores)
+
+        perm = torch.argsort(src_index, stable=True)
+        src_sorted = src_index[perm]
+        scores_sorted = scores[perm]
+
+        _, counts = torch.unique_consecutive(src_sorted, return_counts=True)
+
+        mask_sorted = torch.zeros_like(scores_sorted)
+
+        start = 0
+        for cnt in counts.tolist():
+            end = start + cnt
+            seg = scores_sorted[start:end]
+
+            k_keep = max(1, int(round(cnt * ratio_k)))
+            k_keep = min(k_keep, cnt)
+
+            top_idx = torch.topk(seg, k=k_keep, largest=True).indices
+            mask_sorted[start + top_idx] = 1.0
+
+            start = end
+
+        mask = torch.zeros_like(mask_sorted)
+        mask[perm] = mask_sorted
+
+        return mask
+
+    def forward(self, features, indices, values, temperature):
+        src = indices[0]
+        dst = indices[1]
+
+        f1_features = torch.index_select(features, 0, src)
+        f2_features = torch.index_select(features, 0, dst)
+        auv = torch.unsqueeze(values, -1)
+
+        edge_features = torch.cat([f1_features, f2_features, auv], dim=-1)
+        raw_scores = self.internal_forward(edge_features).view(-1)
+
+        edge_prob = self.gumbel_softmax_sample(
+            logits=raw_scores,
+            src_index=src,
+            temperature=temperature,
+        )
+
+        expert_mask = self._group_topk_mask(edge_prob, src, self.k)
+        masked_scores = expert_mask * edge_prob
+
+        return raw_scores, edge_prob, expert_mask, masked_scores
