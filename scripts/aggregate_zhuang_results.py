@@ -17,6 +17,7 @@ mpl.rcParams["pdf.fonttype"] = 42
 mpl.rcParams["ps.fonttype"] = 42
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "steep" / "config"
+DEFAULT_OUTPUT_CSV = Path("results") / "zhuang_summary.csv"
 
 
 def default_eval_root() -> Path:
@@ -138,8 +139,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-csv",
         type=Path,
-        required=True,
-        help="Output all-method summary CSV path.",
+        default=DEFAULT_OUTPUT_CSV,
+        help=f"Output all-method summary CSV path. Default: {DEFAULT_OUTPUT_CSV}",
     )
 
     parser.add_argument(
@@ -461,7 +462,6 @@ def group_metric_by_method_and_x(
 def plot_panel(
     ax,
     scores: dict[str, dict[float, list[float]]],
-    ylabel: str,
     title: str,
     group: str,
     xlabel: str = "Retention Ratio",
@@ -487,8 +487,8 @@ def plot_panel(
         )
 
     ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.set_title(title, fontsize=11)
+    ax.set_ylabel("")
+    ax.set_title(title, fontsize=14)
     ax.grid(alpha=0.2)
 
 
@@ -546,24 +546,21 @@ def write_plot(
     plot_panel(
         axes[0],
         score_values,
-        ylabel=score_label,
-        title=f"{group} {score_label}",
+        title=score_label,
         group=group,
     )
 
     plot_panel(
         axes[1],
         gpu_memory_scores,
-        ylabel="GPU Memory (GiB)",
-        title=f"{group} Memory",
+        title="GPU Memory (GiB)",
         group=group,
     )
 
     plot_panel(
         axes[2],
         runtime_scores,
-        ylabel="Runtime (s)",
-        title=f"{group} Runtime",
+        title="Runtime (s)",
         group=group,
     )
 

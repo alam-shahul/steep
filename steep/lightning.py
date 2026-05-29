@@ -222,11 +222,10 @@ def build_lightning_callbacks(results_folder: Path, enable_lr_monitor: bool = Tr
         _EpochTimerCallback(),
         ModelCheckpoint(
             dirpath=str(results_folder),
-            filename="epoch{epoch:04d}",
+            filename="last",
             auto_insert_metric_name=False,
             save_last=True,
-            save_top_k=-1,
-            every_n_epochs=1,
+            save_top_k=0,
         ),
         ModelCheckpoint(
             dirpath=str(results_folder),

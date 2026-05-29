@@ -298,6 +298,7 @@ class MoGSketcher(AnnDataSketcher):
         lr: float = 1e-3,
         temp_r: float = 1e-3,
         temp_N: int = 1,
+        best_score_eval_interval: int = 10,
         cache_scores: bool = True,
         cache_directory: str | None = None,
         sketch_mode: str = "edge",  # "edge" / "node"
@@ -320,6 +321,7 @@ class MoGSketcher(AnnDataSketcher):
         self.lr = float(lr)
         self.temp_r = float(temp_r)
         self.temp_N = int(temp_N)
+        self.best_score_eval_interval = max(1, int(best_score_eval_interval))
         self.cache_scores = bool(cache_scores)
         self.cache_directory = cache_directory
 
@@ -448,6 +450,13 @@ class MoGSketcher(AnnDataSketcher):
             expr_aug_coef=self.mog_args.get("expr_aug_coef", 0.0),
             expr_topo_mode=self.mog_args.get("expr_topo_mode", "both"),
         ).to(self.device)
+        first_expert = model.learner.experts[0]
+        logger.info(
+            "MoG learner MLP (experts={}, edge_mlp_input_dim={}):\n{}",
+            model.learner.num_experts,
+            first_expert.layers[0].in_features,
+            first_expert,
+        )
 
         optimizer = torch.optim.Adam(model.learner.parameters(), lr=self.lr)
 
@@ -491,32 +500,39 @@ class MoGSketcher(AnnDataSketcher):
             loss.backward()
             optimizer.step()
 
-            model.eval()
-            with torch.no_grad():
-                eval_out = model.learner(
-                    x=features,
-                    edge_index=edge_index,
-                    temp=temp,
-                    edge_attr=edge_attr,
-                )
+            train_loss = float(loss.item())
+            should_eval_score = epoch == 1 or epoch % self.best_score_eval_interval == 0 or epoch == self.epochs
+            if should_eval_score:
+                model.eval()
+                with torch.no_grad():
+                    eval_out = model.learner(
+                        x=features,
+                        edge_index=edge_index,
+                        temp=temp,
+                        edge_attr=edge_attr,
+                    )
 
-            eval_loss = float(eval_out["loss"].item())
-            if eval_loss < best_loss:
-                best_loss = eval_loss
-                best_score = eval_out["edge_score"].detach().clone()
-                best_aux = {
-                    "loss_balance": float(eval_out["loss_balance"].item()),
-                    "loss_topo": float(eval_out["loss_topo"].item()),
-                    "loss_expr": float(eval_out["loss_expr"].item()),
-                }
+                eval_loss = float(eval_out["loss"].item())
+                if eval_loss < best_loss:
+                    best_loss = eval_loss
+                    best_score = eval_out["edge_score"].detach().clone()
+                    best_aux = {
+                        "loss_balance": float(eval_out["loss_balance"].item()),
+                        "loss_topo": float(eval_out["loss_topo"].item()),
+                        "loss_expr": float(eval_out["loss_expr"].item()),
+                    }
+            else:
+                eval_loss = None
 
-            progress.set_postfix(loss=f"{eval_loss:.4g}", best=f"{best_loss:.4g}")
+            progress.set_postfix(loss=f"{train_loss:.4g}", best=f"{best_loss:.4g}")
             if epoch == 1 or epoch % log_interval == 0 or epoch == self.epochs:
+                eval_loss_text = "n/a" if eval_loss is None else f"{eval_loss:.6f}"
                 logger.info(
-                    "MoG epoch {}/{} loss={:.6f} best_loss={:.6f}",
+                    "MoG epoch {}/{} train_loss={:.6f} eval_loss={} best_loss={:.6f}",
                     epoch,
                     self.epochs,
-                    eval_loss,
+                    train_loss,
+                    eval_loss_text,
                     best_loss,
                 )
 
@@ -656,6 +672,7 @@ class MoGSketcher(AnnDataSketcher):
             "lr": self.lr,
             "temp_r": self.temp_r,
             "temp_N": self.temp_N,
+            "best_score_eval_interval": self.best_score_eval_interval,
             "mog_args": {k: v for k, v in self.mog_args.items() if k != "retention_ratio"},
             "expr_topo_mode": self.mog_args.get("expr_topo_mode", "both"),
             "loss_version": "expr_topo_v1",

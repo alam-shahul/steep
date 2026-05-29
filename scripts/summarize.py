@@ -163,8 +163,8 @@ def _plot_metric_panel(ax, grouped_scores: dict[str, dict[float, list[float]]], 
         )
 
     ax.set_xlabel("Retention Ratio")
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
+    ax.set_ylabel("")
+    ax.set_title(ylabel, fontsize=14)
     ax.grid(alpha=0.25)
 
 

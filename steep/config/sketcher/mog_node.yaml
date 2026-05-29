@@ -3,8 +3,11 @@ type: steep.sketcher.MoGSketcher
 args:
   random_seed: 0
   device: cuda
-  epochs: 500
+  epochs: 100
   lr: 0.001
+  best_score_eval_interval: 10
+  use_topo: true
+  use_expr_prior: true
   edge_attr_mode: adjacency
   cache_scores: true
   sketch_mode: node
