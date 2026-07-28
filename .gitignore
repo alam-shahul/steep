@@ -5,6 +5,11 @@ __pycache__/
 .env
 *.swp
 **/.ipynb_checkpoints
+
+# Generated experiment outputs
+*.out
+*.csv
+
 AGENTS.md
 findings.md
 progress.md
