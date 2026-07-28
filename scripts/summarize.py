@@ -225,11 +225,7 @@ def write_gallery_plot(
     output_path: Path,
     seed: int,
 ) -> None:
-    sketch_rows = [
-        row
-        for row in rows
-        if row.get("condition") == "sketch" and str(row.get("sketcher.args.random_seed")) == str(seed)
-    ]
+    sketch_rows = [row for row in rows if row.get("condition") == "sketch" and str(row.get("seed")) == str(seed)]
     if not sketch_rows:
         raise ValueError(f"No sketch rows found for gallery seed {seed}.")
 

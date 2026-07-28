@@ -274,12 +274,6 @@ def retention_ratio_from_sketcher_config(sketcher_config: dict[str, Any]) -> flo
     return None if value is None else float(value)
 
 
-def random_seed_from_sketcher_config(sketcher_config: dict[str, Any]) -> int | None:
-    args = sketcher_config.get("args") or {}
-    value = args.get("random_seed")
-    return None if value is None else int(value)
-
-
 def load_evaluation_json(eval_json: Path) -> dict[str, Any] | None:
     if not eval_json.exists():
         return None
@@ -320,7 +314,8 @@ def build_row_from_config(config_path: Path) -> dict[str, Any] | None:
     method_type = method_name_to_type(method_name)
     method_group = method_name_to_group(method_name)
     retention_ratio = retention_ratio_from_sketcher_config(sketcher_config)
-    random_seed = random_seed_from_sketcher_config(sketcher_config)
+    random_seed = input_config.get("seed")
+    random_seed = None if random_seed is None else int(random_seed)
 
     if method_type is None or method_group is None or retention_ratio is None or random_seed is None:
         return None
@@ -343,7 +338,7 @@ def build_row_from_config(config_path: Path) -> dict[str, Any] | None:
         "sketcher.type": method_type,
         "sketcher.short_name": short_name,
         "sketcher.args.retention_ratio": retention_ratio,
-        "sketcher.args.random_seed": random_seed,
+        "seed": random_seed,
         **flatten_dict(evaluation, prefix="evaluation"),
     }
 
@@ -373,7 +368,7 @@ def deduplicate_rows_by_latest_evaluation(rows: list[dict[str, Any]]) -> list[di
             row["method_group"],
             row["sketcher.short_name"],
             float(row["sketcher.args.retention_ratio"]),
-            int(row["sketcher.args.random_seed"]),
+            int(row["seed"]),
         )
 
         eval_json = Path(row["evaluation_json"])
@@ -405,7 +400,7 @@ def deduplicate_rows_by_latest_evaluation(rows: list[dict[str, Any]]) -> list[di
             r["method_group"],
             method_rank(r["sketcher.short_name"], r["method_group"]),
             float(r["sketcher.args.retention_ratio"]),
-            int(r["sketcher.args.random_seed"]),
+            int(r["seed"]),
         ),
     )
 
