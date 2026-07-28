@@ -1,6 +1,5 @@
 from typing import Callable, Tuple, Union
 
-import networkx as nx
 import numpy as np
 import torch
 import torch.nn as nn
@@ -20,6 +19,11 @@ try:
     import networkit as nk
 except ImportError:
     nk = None
+
+
+def _edge_scores_in_input_order(graph, edges, score_vectors):
+    edge_ids = [graph.edgeId(src, dst) for src, dst in edges]
+    return [[scores[edge_id] for scores in score_vectors] for edge_id in edge_ids]
 
 
 class BinaryStep(torch.autograd.Function):
@@ -251,6 +255,34 @@ class MoE(nn.Module):
         target = (target - target.min()) / (target.max() - target.min() + 1e-12)
         return F.mse_loss(values, target)
 
+    def _expr_prior_for(self, values):
+        if self.expr_prior is None:
+            return None
+        return self.expr_prior.to(device=values.device, dtype=values.dtype).view(-1)
+
+    def _topo_prior_for(self, values, expr_prior):
+        if self.topo_val is None:
+            return None
+
+        topo_prior = self.topo_val.to(device=values.device, dtype=values.dtype)
+        if self.expr_topo_mode == "topo" or expr_prior is None:
+            return topo_prior.mean(dim=1)
+        if self.expr_topo_mode == "expr":
+            return None
+
+        expr_prior = expr_prior.clamp(0.0, 1.0)
+        if self.expr_topo_mode == "both":
+            topo_prior = torch.cat(
+                [
+                    topo_prior * expr_prior.unsqueeze(1),
+                    topo_prior * (1.0 - expr_prior).unsqueeze(1),
+                ],
+                dim=1,
+            )
+        else:
+            raise ValueError(f"Unsupported expr_topo_mode: {self.expr_topo_mode}")
+        return topo_prior.mean(dim=1).clamp(0.0, 1.0)
+
     def cv_squared(self, x):
         """Squared coefficient of variation, used as load-balancing loss."""
         eps = 1e-10
@@ -350,6 +382,14 @@ class MoE(nn.Module):
         gated_output = edge_gates * expert_outputs
         gated_output = gated_output.mean(dim=1)  # [num_edges]
 
+        selection_score = gated_output
+        expr_prior = self._expr_prior_for(selection_score)
+        if expr_prior is not None:
+            if expr_prior.numel() != selection_score.numel():
+                raise ValueError(f"expr_prior has {expr_prior.numel()} edges, expected {selection_score.numel()}")
+            if self.expr_aug_coef != 0.0:
+                selection_score = selection_score + self.expr_aug_coef * expr_prior
+
         # Per-node top-k edges based on mixture scores
         node_idx, num_edges_per_node = edge_index[0].unique(return_counts=True)
         k_per_node = torch.sum(node_gates * torch.unsqueeze(self.k_list, 0), dim=1)
@@ -362,7 +402,7 @@ class MoE(nn.Module):
         )
 
         # Global sort and grouping by source node
-        sparse_values, val_sort_idx = gated_output.sort(descending=True)
+        sparse_values, val_sort_idx = selection_score.sort(descending=True)
         sparse_idx0 = edge_index[0].index_select(dim=-1, index=val_sort_idx)
         idx_sort_idx = sparse_idx0.argsort(stable=True, dim=-1, descending=False)
         scores_sorted = sparse_values.index_select(dim=-1, index=idx_sort_idx)
@@ -391,18 +431,18 @@ class MoE(nn.Module):
 
         zero = gated_output.new_tensor(0.0)
         loss_topo = zero
-        if self.topo_val is not None and self.topo_loss_coef > 0 and self.expr_topo_mode in {"both", "topo"}:
-            topo_prior = self.topo_val.mean(dim=1)
+        topo_prior = self._topo_prior_for(gated_output, expr_prior)
+        if topo_prior is not None and self.topo_loss_coef > 0:
             loss_topo = self._normalized_mse(gated_output, topo_prior) * self.topo_loss_coef
 
         loss_expr = zero
-        if self.expr_prior is not None and self.expr_loss_coef > 0 and self.expr_topo_mode in {"both", "expr"}:
-            loss_expr = self._normalized_mse(gated_output, self.expr_prior) * self.expr_loss_coef
+        if expr_prior is not None and self.expr_loss_coef > 0 and self.expr_topo_mode in {"both", "expr"}:
+            loss_expr = self._normalized_mse(gated_output, expr_prior) * self.expr_loss_coef
 
         loss = loss_balance + loss_topo + loss_expr
 
         return {
-            "edge_score": gated_output,
+            "edge_score": selection_score,
             "edge_mask": mask,
             "loss": loss,
             "loss_balance": loss_balance,
@@ -410,25 +450,33 @@ class MoE(nn.Module):
             "loss_expr": loss_expr,
         }
 
-    def get_topo_val(self, edge_index):
+    def get_topo_val(self, edge_index, random_seed: int | None = None):
         """Compute 4 networkit-based topological scores for each edge."""
         if nk is None:
             raise ImportError("MoG topology scores require networkit. Install networkit or set use_topo=false.")
 
-        G = nx.DiGraph()
-        edges = edge_index.t().tolist()
-        G.add_edges_from(edges)
-        G = nk.nxadapter.nx2nk(G)
-        G.indexEdges()
+        if random_seed is not None:
+            nk.setSeed(int(random_seed), False)
+
+        edges = [(int(src), int(dst)) for src, dst in edge_index.t().detach().cpu().tolist()]
+        num_nodes = max((max(edge) for edge in edges), default=-1) + 1
+        graph = nk.Graph(num_nodes, weighted=False, directed=True)
+        for src, dst in edges:
+            if not graph.hasEdge(src, dst):
+                graph.addEdge(src, dst)
+        graph.indexEdges()
 
         # A set of sparsification scores per edge
-        lds = nk.sparsification.LocalDegreeScore(G).run().scores()
-        ffs = nk.sparsification.ForestFireScore(G, 0.6, 5.0).run().scores()
-        triangles = nk.sparsification.TriangleEdgeScore(G).run().scores()
-        lss = nk.sparsification.LocalSimilarityScore(G, triangles).run().scores()
-        scan = nk.sparsification.SCANStructuralSimilarityScore(G, triangles).run().scores()
+        lds = nk.sparsification.LocalDegreeScore(graph).run().scores()
+        ffs = nk.sparsification.ForestFireScore(graph, 0.6, 5.0).run().scores()
+        triangles = nk.sparsification.TriangleEdgeScore(graph).run().scores()
+        lss = nk.sparsification.LocalSimilarityScore(graph, triangles).run().scores()
+        scan = nk.sparsification.SCANStructuralSimilarityScore(graph, triangles).run().scores()
 
-        topo_val = torch.tensor([lds, ffs, lss, scan], device=edge_index.device).t()
+        topo_val = torch.tensor(
+            _edge_scores_in_input_order(graph, edges, (lds, ffs, lss, scan)),
+            device=edge_index.device,
+        )
         normalized_features = F.normalize(topo_val, dim=0)
         self.topo_val = normalized_features
 
