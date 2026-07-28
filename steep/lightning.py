@@ -256,7 +256,7 @@ def capture_rng_state() -> dict[str, Any]:
     }
 
 
-def restore_rng_state(checkpoint: dict[str, Any], rng: torch.Generator | None = None) -> None:
+def restore_rng_state(checkpoint: dict[str, Any]) -> None:
     python_rng_state = checkpoint.get("python_rng_state")
     if python_rng_state is not None:
         random.setstate(python_rng_state)
@@ -268,8 +268,6 @@ def restore_rng_state(checkpoint: dict[str, Any], rng: torch.Generator | None = 
     torch_rng_state = checkpoint.get("torch_rng_state")
     if torch_rng_state is not None:
         torch_rng_state = torch_rng_state.cpu()
-        if rng is not None:
-            rng.set_state(torch_rng_state)
         torch.random.set_rng_state(torch_rng_state)
 
     cuda_rng_state_all = checkpoint.get("cuda_rng_state_all")

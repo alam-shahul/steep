@@ -88,13 +88,15 @@ def test_fresh_sketch_run_ignores_dataset_and_score_caches(tmp_path: Path, monke
             )
 
     monkeypatch.setattr(benchmark_module, "get_fully_qualified_cache_paths", lambda *args, **kwargs: output_dir)
-    monkeypatch.setattr(benchmark_module, "instantiate_from_config", lambda cfg: FakeSketcher())
+    monkeypatch.setattr(benchmark_module, "instantiate_from_config", lambda cfg, **kwargs: FakeSketcher())
 
     benchmark = Benchmark.__new__(Benchmark)
     benchmark.resume_from_checkpoint = False
+    benchmark.random_seed = 0
     benchmark.cfg = OmegaConf.create(
         {
             "cache_dir": str(tmp_path / "cache"),
+            "seed": 0,
             "dataset": {"args": {"data_directory": str(input_dir)}},
             "sketcher": {"type": "fake"},
         },

@@ -1,7 +1,6 @@
 type: steep.sketcher.MoGSketcher
 
 args:
-  random_seed: 0
   device: cuda
   epochs: 100
   lr: 0.001

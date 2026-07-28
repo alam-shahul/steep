@@ -70,7 +70,7 @@ python scripts/evaluate.py \
     benchmark=zhuang \
     "+sketcher=$sketcher" \
     "$retention_key=$ratio" \
-    "sketcher.args.random_seed=$seed" \
+    "seed=$seed" \
     trainer.args.epochs=100 \
     trainer.args.device=cuda \
     trainer.args.accelerator=gpu \

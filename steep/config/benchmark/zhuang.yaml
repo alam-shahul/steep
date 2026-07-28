@@ -8,7 +8,6 @@ args:
     - supertype
     - cluster
   num_workers: 1
-  random_seed: 0
   n_neighbors: 15
   leiden_resolution: 1.0
   clustering_backend: rapids

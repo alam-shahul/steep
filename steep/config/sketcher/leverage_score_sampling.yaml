@@ -2,4 +2,3 @@ type: steep.sketcher.LeverageScoreSketcher
 
 args:
   retention_ratio: 0.1
-  random_seed: 0

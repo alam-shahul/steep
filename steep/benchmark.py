@@ -501,7 +501,7 @@ class Benchmark:
             with open(metadata_path) as f:
                 return output_dir, json.load(f)
 
-        sketcher = instantiate_from_config(self.cfg.sketcher)
+        sketcher = instantiate_from_config(self.cfg.sketcher, random_seed=self.random_seed)
         if not self.resume_from_checkpoint and hasattr(sketcher, "cache_scores"):
             logger.info("Sketcher score cache disabled for fresh run")
             sketcher.cache_scores = False

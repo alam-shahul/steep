@@ -112,9 +112,11 @@ class _PyGLightningModule(L.LightningModule):
     def on_save_checkpoint(self, checkpoint: dict[str, object]) -> None:
         checkpoint["step"] = int(self.global_step)
         checkpoint.update(capture_rng_state())
+        checkpoint["dataloader_rng_states"] = self.owner.dataloader_rng_states()
 
     def on_load_checkpoint(self, checkpoint: dict[str, object]) -> None:
-        restore_rng_state(checkpoint, rng=self.owner.rng)
+        restore_rng_state(checkpoint)
+        self.owner.restore_dataloader_rng_states(checkpoint.get("dataloader_rng_states"))
         _, step = extract_epoch_and_step(checkpoint)
         self.owner.step = step
 
@@ -203,8 +205,12 @@ class PyGTrainer:
         self.pin_memory = device.startswith("cuda") if pin_memory is None else pin_memory
 
         # Random seeds
-        self.random_seed = random_seed
-        self.rng = torch.Generator().manual_seed(random_seed)
+        self.random_seed = int(random_seed)
+        self.split_generator = torch.Generator().manual_seed(self.random_seed)
+        self.dataloader_generators = {
+            split: torch.Generator().manual_seed(self.random_seed + offset)
+            for offset, split in enumerate(("train", "val", "test", "full"), start=1)
+        }
 
         # Dataloader setup
         self.data = data
@@ -251,7 +257,7 @@ class PyGTrainer:
             train_dataset, val_dataset, test_dataset = random_split(
                 self._data,
                 [train_size, val_size, test_size],
-                generator=self.rng,
+                generator=self.split_generator,
             )
         elif self.split_type == "spatial_block":
             train_dataset, val_dataset, test_dataset = self._build_spatial_block_datasets()
@@ -275,6 +281,7 @@ class PyGTrainer:
                 split_dataset,
                 batch_size=self.batchsize,
                 shuffle=split_shuffle,
+                generator=self.dataloader_generators[split],
                 num_workers=self.num_workers,
                 persistent_workers=self.persistent_workers if self.num_workers > 0 else False,
                 pin_memory=self.pin_memory,
@@ -284,6 +291,17 @@ class PyGTrainer:
             dataloader_summaries.append(f"{split}: {len(dataloader)} batches/{len(split_dataset)} samples")
 
         logger.info("DataLoaders initialized ({})", ", ".join(dataloader_summaries))
+
+    def dataloader_rng_states(self) -> dict[str, torch.Tensor]:
+        return {split: generator.get_state() for split, generator in self.dataloader_generators.items()}
+
+    def restore_dataloader_rng_states(self, states) -> None:
+        if not isinstance(states, dict):
+            return
+        for split, state in states.items():
+            generator = self.dataloader_generators.get(split)
+            if generator is not None:
+                generator.set_state(state.cpu())
 
     def _build_spatial_block_datasets(self) -> tuple[Dataset, Dataset, Dataset]:
         node_subsets = {
@@ -464,6 +482,7 @@ class PyGTrainer:
             "numpy_rng_state": np.random.get_state(),
             "torch_rng_state": torch.random.get_rng_state(),
             "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "dataloader_rng_states": self.dataloader_rng_states(),
         }
 
         # Save checkpoint
@@ -484,7 +503,8 @@ class PyGTrainer:
     def load_trainer_state(self, data):
         self.optimizer.load_state_dict(data["optimizer"])
         self.lr_scheduler.load_state_dict(data["lr_scheduler"])
-        restore_rng_state(data, rng=self.rng)
+        restore_rng_state(data)
+        self.restore_dataloader_rng_states(data.get("dataloader_rng_states"))
 
         epoch = data["epoch"]
         self.step = data["step"]
@@ -784,6 +804,8 @@ class PyGTrainer:
 
 
 def setup_trainer(config):
+    L.seed_everything(int(config.seed), workers=True)
+
     # Inferring num_genes
     data_directory = Path(config.dataset.args.data_directory)
     first_filepath = next(data_directory.glob("*.h5ad"))
@@ -797,6 +819,7 @@ def setup_trainer(config):
         cfg=config,
         model=model,
         data=data,
+        random_seed=int(config.seed),
     )
     trainer.load_pretrained()
 

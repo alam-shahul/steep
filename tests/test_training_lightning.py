@@ -6,8 +6,9 @@ from omegaconf import OmegaConf
 from torch import nn
 from torch_geometric.data import Data
 
+import steep.trainer as trainer_module
 from steep.lightning import cleanup_distributed
-from steep.trainer import PyGTrainer
+from steep.trainer import PyGTrainer, setup_trainer
 from steep.utils import instantiate_from_config
 
 
@@ -86,6 +87,8 @@ def _make_trainer_cfg(tmp_path, pretrained_ckpt_path: str | None = None):
     cfg = OmegaConf.create(
         {
             "cache_dir": str(tmp_path / "cache"),
+            "seed": 0,
+            "float_dtype": "float32",
             "project": "tests",
             "run_name": "lightning-smoke",
             "entity": "tests",
@@ -99,6 +102,97 @@ def _make_trainer_cfg(tmp_path, pretrained_ckpt_path: str | None = None):
     if pretrained_ckpt_path is not None:
         cfg.pretrained_ckpt_path = pretrained_ckpt_path
     return cfg
+
+
+def test_pyg_trainer_seed_controls_split_and_dataloader_order(tmp_path):
+    def build(seed):
+        return PyGTrainer(
+            cfg=_make_trainer_cfg(tmp_path),
+            model=ToyAutoencoder(),
+            data=_make_toy_dataset(num_graphs=10),
+            batchsize=2,
+            epochs=1,
+            device="cpu",
+            random_seed=seed,
+            train_ratio=0.6,
+            val_ratio=0.2,
+            accelerator="cpu",
+            num_workers=0,
+            run_wandb=False,
+        )
+
+    first = build(7)
+    second = build(7)
+    different = build(8)
+
+    assert first.datasets["train"].indices == second.datasets["train"].indices
+    assert first.datasets["train"].indices != different.datasets["train"].indices
+    assert list(iter(first.dataloaders["train"].sampler)) == list(
+        iter(second.dataloaders["train"].sampler),
+    )
+
+
+def test_pyg_trainer_restores_dataloader_generator_states(tmp_path):
+    trainer = PyGTrainer(
+        cfg=_make_trainer_cfg(tmp_path),
+        model=ToyAutoencoder(),
+        data=_make_toy_dataset(),
+        batchsize=2,
+        epochs=1,
+        device="cpu",
+        random_seed=11,
+        train_ratio=0.6,
+        val_ratio=0.2,
+        accelerator="cpu",
+        num_workers=0,
+        run_wandb=False,
+    )
+    states = trainer.dataloader_rng_states()
+    expected = list(iter(trainer.dataloaders["train"].sampler))
+
+    trainer.restore_dataloader_rng_states(states)
+    actual = list(iter(trainer.dataloaders["train"].sampler))
+
+    assert actual == expected
+
+
+def test_setup_trainer_seeds_before_model_construction(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "slide.h5ad").touch()
+    cfg = OmegaConf.create(
+        {
+            "seed": 19,
+            "dataset": {"type": "dataset", "args": {"data_directory": str(data_dir)}},
+            "model": {"type": "model"},
+            "trainer": {"type": "trainer"},
+        },
+    )
+
+    class FakeAdata:
+        shape = (2, 3)
+
+    class FakeTrainer:
+        def __init__(self, model):
+            self.model = model
+
+        def load_pretrained(self):
+            return None
+
+    def instantiate(config, **kwargs):
+        if config.type == "dataset":
+            return []
+        if config.type == "model":
+            return torch.rand(3)
+        return FakeTrainer(kwargs["model"])
+
+    monkeypatch.setattr(trainer_module.ad, "read_h5ad", lambda path: FakeAdata())
+    monkeypatch.setattr(trainer_module, "instantiate_from_config", instantiate)
+
+    first = setup_trainer(cfg)
+    second = setup_trainer(cfg)
+
+    assert torch.equal(first.model, second.model)
 
 
 def test_pyg_trainer_lightning_fit_saves_last_checkpoint(tmp_path):

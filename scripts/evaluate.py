@@ -20,7 +20,12 @@ from steep.utils import instantiate_from_config
 @hydra.main(config_path="../steep/config", config_name="config", version_base="1.3")
 def main(config):
     trainer = setup_trainer(config)
-    benchmark = instantiate_from_config(config.benchmark, cfg=config, trainer=trainer)
+    benchmark = instantiate_from_config(
+        config.benchmark,
+        cfg=config,
+        trainer=trainer,
+        random_seed=int(config.seed),
+    )
     summary = benchmark.run()
     baseline_json = summary.get("baseline", {}).get("artifacts", {}).get("evaluation_json")
     if baseline_json:

@@ -169,12 +169,6 @@ class AnnDataSketcher(ABC):
         )
 
 
-def fix_seed(seed: int):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-
-
 class RandomSubsampleSketcher(AnnDataSketcher):
     """Uniformly sample a fraction of cells/spots from a processed AnnData."""
 
@@ -499,7 +493,31 @@ class MoGSketcher(AnnDataSketcher):
         expr_prior = (expr_prior + 1.0) / 2.0
         return expr_prior
 
-    def _train_mog(self, features, edge_index, edge_attr):
+    def _train_mog(
+        self,
+        features: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_attr: torch.Tensor,
+        random_seed: int,
+    ):
+        devices = []
+        if self.device.type == "cuda":
+            device_index = self.device.index
+            devices = [torch.cuda.current_device() if device_index is None else device_index]
+
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(random_seed)
+            if self.device.type == "cuda":
+                with torch.cuda.device(devices[0]):
+                    torch.cuda.manual_seed(random_seed)
+            return self._train_mog_impl(
+                features=features,
+                edge_index=edge_index,
+                edge_attr=edge_attr,
+                random_seed=random_seed,
+            )
+
+    def _train_mog_impl(self, features, edge_index, edge_attr, random_seed: int):
         num_features = features.size(1)
         logger.info(
             "MoG training start (cells={}, edges={}, features={}, epochs={}, device={})",
@@ -537,7 +555,7 @@ class MoGSketcher(AnnDataSketcher):
         if self.use_topo:
             start = time.perf_counter()
             logger.info("MoG topology scoring start")
-            model.learner.get_topo_val(edge_index)
+            model.learner.get_topo_val(edge_index, random_seed=random_seed)
             logger.info("MoG topology scoring complete ({:.2f}s)", time.perf_counter() - start)
         else:
             model.learner.topo_val = None
@@ -795,15 +813,21 @@ class MoGSketcher(AnnDataSketcher):
     def transform(self, adata: ad.AnnData) -> ad.AnnData:
         return self._transform_impl(adata=adata, input_path=None)
 
+    def _slide_seed(self, adata: ad.AnnData, input_path: str | Path | None) -> int:
+        slide_identity = (
+            str(Path(input_path).resolve()) if input_path is not None else f"in-memory:{adata.n_obs}:{adata.n_vars}"
+        )
+        digest = hashlib.md5(f"{self.random_seed}:{slide_identity}".encode()).digest()
+        return int.from_bytes(digest[:4], byteorder="little", signed=False)
+
     def _transform_impl(
         self,
         adata: ad.AnnData,
         input_path: str | Path | None = None,
     ) -> ad.AnnData:
-        fix_seed(self.random_seed)
-
         adata = adata.copy()
         slide_name = Path(input_path).name if input_path is not None else "<memory>"
+        slide_seed = self._slide_seed(adata, input_path)
         logger.info(
             "MoG slide sketch start (slide={}, cells={}, vars={}, mode={}, retention_ratio={})",
             slide_name,
@@ -859,6 +883,7 @@ class MoGSketcher(AnnDataSketcher):
                 features=features,
                 edge_index=edge_index,
                 edge_attr=edge_attr,
+                random_seed=slide_seed,
             )
             logger.info("MoG slide model training complete (slide={}, best_loss={:.6f})", slide_name, best_loss)
             if cache_path is not None:
