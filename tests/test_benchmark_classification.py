@@ -83,6 +83,8 @@ def test_fresh_sketch_run_ignores_dataset_and_score_caches(tmp_path: Path, monke
                 sketched_num_edges=8,
                 original_disk_bytes=100,
                 sketched_disk_bytes=50,
+                original_num_edge_pairs=10,
+                sketched_num_edge_pairs=4,
             )
 
     monkeypatch.setattr(benchmark_module, "get_fully_qualified_cache_paths", lambda *args, **kwargs: output_dir)

@@ -69,6 +69,8 @@ class SketchResult:
     original_disk_bytes: int
     sketched_disk_bytes: int
     sketch_time_seconds: float
+    original_num_edge_pairs: int | None = None
+    sketched_num_edge_pairs: int | None = None
     output_directory: str | None = None
     evaluation: EvaluationResult | None = None
 
@@ -513,6 +515,9 @@ class Benchmark:
         total_sketched_num_edges = 0
         total_original_disk_bytes = 0
         total_sketched_disk_bytes = 0
+        total_original_num_edge_pairs = 0
+        total_sketched_num_edge_pairs = 0
+        has_edge_pair_counts = False
 
         for slide_index, input_path in enumerate(input_paths, start=1):
             output_path = output_dir / input_path.name
@@ -530,6 +535,10 @@ class Benchmark:
             total_sketched_num_edges += int(metadata.sketched_num_edges or 0)
             total_original_disk_bytes += int(metadata.original_disk_bytes or 0)
             total_sketched_disk_bytes += int(metadata.sketched_disk_bytes or 0)
+            if metadata.original_num_edge_pairs is not None:
+                has_edge_pair_counts = True
+                total_original_num_edge_pairs += metadata.original_num_edge_pairs
+                total_sketched_num_edge_pairs += int(metadata.sketched_num_edge_pairs or 0)
             logger.info(
                 "Sketch slide {}/{} complete (cells {} -> {}, edges {} -> {}, {:.2f}s)",
                 slide_index,
@@ -542,7 +551,6 @@ class Benchmark:
             )
 
         compression_ratio = total_sketched_num_cells / total_original_num_cells if total_original_num_cells > 0 else 0.0
-
         metadata = {
             "sketcher_type": self.cfg.sketcher.type,
             "original_num_cells": total_original_num_cells,
@@ -553,6 +561,8 @@ class Benchmark:
             "original_disk_bytes": total_original_disk_bytes,
             "sketched_disk_bytes": total_sketched_disk_bytes,
             "sketch_time_seconds": total_sketch_time_seconds,
+            "original_num_edge_pairs": total_original_num_edge_pairs if has_edge_pair_counts else None,
+            "sketched_num_edge_pairs": total_sketched_num_edge_pairs if has_edge_pair_counts else None,
         }
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)

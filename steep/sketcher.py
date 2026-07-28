@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -37,6 +38,78 @@ import torch.nn.functional as F
 from scipy.sparse import issparse
 
 from steep.models._sparsify import MoG
+from steep.utils._general import hash_config
+
+
+def canonical_edge_pairs(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return sorted undirected pairs and a directed-edge-to-pair mapping."""
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, num_edges]")
+    if num_nodes <= 0:
+        if edge_index.shape[1]:
+            raise ValueError("num_nodes must be positive when edge_index is non-empty")
+        return edge_index.new_empty((2, 0)), edge_index.new_empty((0,), dtype=torch.long)
+
+    src, dst = edge_index
+    valid = src != dst
+    if not torch.any(valid):
+        return edge_index.new_empty((2, 0)), edge_index.new_full((edge_index.shape[1],), -1, dtype=torch.long)
+
+    low = torch.minimum(src[valid], dst[valid])
+    high = torch.maximum(src[valid], dst[valid])
+    keys = low * int(num_nodes) + high
+    unique_keys, inverse = torch.unique(keys, sorted=True, return_inverse=True)
+    pairs = torch.stack(
+        (
+            torch.div(unique_keys, int(num_nodes), rounding_mode="floor"),
+            unique_keys.remainder(int(num_nodes)),
+        ),
+    )
+    edge_to_pair = torch.full((edge_index.size(1),), -1, dtype=torch.long, device=edge_index.device)
+    edge_to_pair[valid] = inverse
+    return pairs, edge_to_pair
+
+
+def mean_pair_scores(
+    edge_scores: torch.Tensor,
+    edge_to_pair: torch.Tensor,
+    num_pairs: int,
+) -> torch.Tensor:
+    """Average all available directed scores for each undirected pair."""
+    valid = edge_to_pair >= 0
+    pair_scores = torch.zeros(num_pairs, dtype=edge_scores.dtype, device=edge_scores.device)
+    pair_counts = torch.zeros(num_pairs, dtype=edge_scores.dtype, device=edge_scores.device)
+    pair_scores.scatter_add_(0, edge_to_pair[valid], edge_scores[valid])
+    pair_counts.scatter_add_(0, edge_to_pair[valid], torch.ones_like(edge_scores[valid]))
+    return pair_scores / pair_counts.clamp_min(1)
+
+
+def target_budget_count(total: int, retention_ratio: float) -> int:
+    if total == 0:
+        return 0
+    return min(total, max(1, int(math.ceil(total * float(retention_ratio)))))
+
+
+def topk_pair_mask(scores: torch.Tensor, retention_ratio: float) -> torch.Tensor:
+    """Select an exact pair budget, preserving pair order for tied scores."""
+    target = target_budget_count(scores.numel(), retention_ratio)
+    mask = torch.zeros(scores.numel(), dtype=torch.bool, device=scores.device)
+    if target:
+        order = torch.argsort(scores, descending=True, stable=True)
+        mask[order[:target]] = True
+    return mask
+
+
+def topk_pair_mask_numpy(scores: np.ndarray, retention_ratio: float) -> np.ndarray:
+    return topk_pair_mask(torch.as_tensor(scores), retention_ratio).cpu().numpy()
+
+
+def num_undirected_edge_pairs(adjacency) -> int:
+    adjacency = sp.csr_matrix(adjacency)
+    return int(sp.triu(adjacency.maximum(adjacency.T), k=1).nnz)
 
 
 @dataclass
@@ -49,6 +122,8 @@ class SketchMetadata:
     original_disk_bytes: int | None = None
     sketched_disk_bytes: int | None = None
     sketch_time_seconds: float | None = None
+    original_num_edge_pairs: int | None = None
+    sketched_num_edge_pairs: int | None = None
 
 
 class AnnDataSketcher(ABC):
@@ -82,7 +157,6 @@ class AnnDataSketcher(ABC):
         original_num_cells = int(adata.n_obs)
         sketched_num_cells = int(sketched_adata.n_obs)
         compression_ratio = sketched_num_cells / original_num_cells if original_num_cells > 0 else 0.0
-
         return SketchMetadata(
             original_num_cells=original_num_cells,
             sketched_num_cells=sketched_num_cells,
@@ -588,27 +662,23 @@ class MoGSketcher(AnnDataSketcher):
         out.obsp[self.adjacency_matrix_key] = adj_sub
         return out
 
-    def _mask_from_score(self, edge_score: torch.Tensor) -> torch.Tensor:
+    def _pairs_from_score(
+        self,
+        edge_score: torch.Tensor,
+        edge_index: torch.Tensor,
+        num_nodes: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         ratio = self.mog_args.get("retention_ratio", None)
-        num_edges = edge_score.numel()
-
-        if num_edges == 0:
-            return torch.zeros_like(edge_score, dtype=torch.bool)
-
         if ratio is None:
-            return edge_score > 0
+            raise ValueError("Edge mode requires mog_args.retention_ratio.")
 
         ratio = float(ratio)
         if not (0 < ratio <= 1):
             raise ValueError(f"retention_ratio must be in (0, 1], got {ratio}")
 
-        k = max(1, int(np.ceil(num_edges * ratio)))
-        k = min(k, num_edges)
-
-        top_idx = torch.topk(edge_score, k=k, largest=True).indices
-        mask = torch.zeros(num_edges, dtype=torch.bool, device=edge_score.device)
-        mask[top_idx] = True
-        return mask
+        pairs, edge_to_pair = canonical_edge_pairs(edge_index, num_nodes=num_nodes)
+        pair_scores = mean_pair_scores(edge_score, edge_to_pair, num_pairs=pairs.size(1))
+        return pairs, topk_pair_mask(pair_scores, ratio)
 
     def _node_mask_from_edge_score(
         self,
@@ -804,11 +874,16 @@ class MoGSketcher(AnnDataSketcher):
         orig_edges = int(adata.obsp[self.adjacency_matrix_key].nnz)
 
         if self.sketch_mode == "edge":
-            edge_mask = self._mask_from_score(best_score)
-            new_edge_index = edge_index[:, edge_mask]
+            pairs, pair_mask = self._pairs_from_score(
+                edge_score=best_score,
+                edge_index=edge_index,
+                num_nodes=adata.n_obs,
+            )
+            selected_pairs = pairs[:, pair_mask]
+            new_edge_index = torch.cat((selected_pairs, selected_pairs.flip(0)), dim=1)
 
             new_edge_values = torch.ones(
-                int(edge_mask.sum().item()),
+                new_edge_index.size(1),
                 dtype=torch.float32,
                 device=edge_index.device,
             )
@@ -829,6 +904,18 @@ class MoGSketcher(AnnDataSketcher):
                 new_adata.obsp[self.adjacency_matrix_key] = new_adj
 
             selected_node_ratio = new_adata.n_obs / adata.n_obs if adata.n_obs > 0 else 0.0
+            original_num_edge_pairs = pairs.size(1)
+            target_count = target_budget_count(
+                original_num_edge_pairs,
+                float(self.mog_args["retention_ratio"]),
+            )
+            sketched_num_edge_pairs = num_undirected_edge_pairs(
+                new_adata.obsp[self.adjacency_matrix_key],
+            )
+            if sketched_num_edge_pairs != target_count:
+                raise RuntimeError(
+                    f"MoG retained {sketched_num_edge_pairs} edge pairs, expected {target_count}.",
+                )
 
         elif self.sketch_mode == "node":
             node_mask = self._node_mask_from_edge_score(
@@ -843,7 +930,6 @@ class MoGSketcher(AnnDataSketcher):
             new_adata.obsp[self.adjacency_matrix_key] = old_adj[node_mask_np][:, node_mask_np].tocsr()
 
             selected_node_ratio = float(node_mask.float().mean().item())
-
         else:
             raise ValueError(f"Unsupported sketch_mode: {self.sketch_mode}")
 
@@ -871,7 +957,6 @@ class MoGSketcher(AnnDataSketcher):
         new_adata.uns["mog_edge_attr_mode"] = self.edge_attr_mode
         new_adata.uns["mog_sketch_mode"] = self.sketch_mode
         new_adata.uns["mog_node_score_mode"] = self.node_score_mode
-
         return new_adata
 
     def fit_transform_to_disk(self, input_path: str | Path, output_path: str | Path) -> SketchMetadata:
@@ -896,6 +981,11 @@ class MoGSketcher(AnnDataSketcher):
         original_num_cells = int(adata.n_obs)
         sketched_num_cells = int(sketched_adata.n_obs)
         compression_ratio = sketched_num_cells / original_num_cells if original_num_cells > 0 else 0.0
+        original_num_edge_pairs = None
+        sketched_num_edge_pairs = None
+        if self.sketch_mode == "edge":
+            original_num_edge_pairs = num_undirected_edge_pairs(adata.obsp[self.adjacency_matrix_key])
+            sketched_num_edge_pairs = num_undirected_edge_pairs(sketched_adata.obsp[self.adjacency_matrix_key])
 
         return SketchMetadata(
             original_num_cells=original_num_cells,
@@ -906,6 +996,8 @@ class MoGSketcher(AnnDataSketcher):
             original_disk_bytes=input_path.stat().st_size,
             sketched_disk_bytes=output_path.stat().st_size,
             sketch_time_seconds=sketch_time_seconds,
+            original_num_edge_pairs=original_num_edge_pairs,
+            sketched_num_edge_pairs=sketched_num_edge_pairs,
         )
 
 
@@ -978,19 +1070,7 @@ class EdgeScoreSketcherBase(AnnDataSketcher, ABC):
 
     def _topk_mask(self, scores: np.ndarray) -> np.ndarray:
         """Keep top retention_ratio fraction of edges."""
-        num_edges = len(scores)
-        if num_edges == 0:
-            return np.zeros(0, dtype=bool)
-
-        k = max(1, int(np.ceil(num_edges * self.retention_ratio)))
-        k = min(k, num_edges)
-
-        order = np.argsort(-scores, kind="mergesort")
-        keep_idx = order[:k]
-
-        mask = np.zeros(num_edges, dtype=bool)
-        mask[keep_idx] = True
-        return mask
+        return topk_pair_mask_numpy(scores, self.retention_ratio)
 
     def _build_adjacency(
         self,
@@ -1010,8 +1090,7 @@ class EdgeScoreSketcherBase(AnnDataSketcher, ABC):
             shape=(num_nodes, num_nodes),
         )
 
-        if self.symmetrize:
-            adj = adj.maximum(adj.T).tocsr()
+        adj = adj.maximum(adj.T).tocsr()
 
         return adj
 
@@ -1161,6 +1240,16 @@ class EdgeScoreSketcherBase(AnnDataSketcher, ABC):
 
         orig_edges = int(adata.obsp[self.adjacency_matrix_key].nnz)
         final_edges = int(new_adata.obsp[self.adjacency_matrix_key].nnz)
+        original_budget_count = len(src)
+        expected_budget_count = target_budget_count(original_budget_count, self.retention_ratio)
+        retained_budget_count = num_undirected_edge_pairs(
+            new_adata.obsp[self.adjacency_matrix_key],
+        )
+        if retained_budget_count != expected_budget_count:
+            raise RuntimeError(
+                f"{self.__class__.__name__} retained {retained_budget_count} edge pairs, "
+                f"expected {expected_budget_count}.",
+            )
 
         new_adata.uns["edge_sketcher_type"] = self.__class__.__name__
         new_adata.uns["edge_retention_ratio_target"] = float(self.retention_ratio)
@@ -1168,7 +1257,6 @@ class EdgeScoreSketcherBase(AnnDataSketcher, ABC):
         new_adata.uns["sketched_num_edges"] = final_edges
         new_adata.uns["original_num_cells"] = int(adata.n_obs)
         new_adata.uns["sketched_num_cells"] = int(new_adata.n_obs)
-
         return new_adata
 
     def fit_transform_to_disk(self, input_path: str | Path, output_path: str | Path) -> SketchMetadata:
@@ -1191,6 +1279,8 @@ class EdgeScoreSketcherBase(AnnDataSketcher, ABC):
         original_num_cells = int(adata.n_obs)
         sketched_num_cells = int(sketched_adata.n_obs)
         compression_ratio = sketched_num_cells / original_num_cells if original_num_cells > 0 else 0.0
+        original_num_edge_pairs = num_undirected_edge_pairs(adata.obsp[self.adjacency_matrix_key])
+        sketched_num_edge_pairs = num_undirected_edge_pairs(sketched_adata.obsp[self.adjacency_matrix_key])
 
         return SketchMetadata(
             original_num_cells=original_num_cells,
@@ -1201,6 +1291,8 @@ class EdgeScoreSketcherBase(AnnDataSketcher, ABC):
             original_disk_bytes=input_path.stat().st_size,
             sketched_disk_bytes=output_path.stat().st_size,
             sketch_time_seconds=sketch_time_seconds,
+            original_num_edge_pairs=original_num_edge_pairs,
+            sketched_num_edge_pairs=sketched_num_edge_pairs,
         )
 
 
