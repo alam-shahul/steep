@@ -13,6 +13,7 @@ authors = [
 dependencies = [  # TODO: check which are necessary
     "packaging",
     "hydra-core",
+    "loguru",
     "omegaconf",
     "wandb",
     "tqdm",
@@ -20,13 +21,18 @@ dependencies = [  # TODO: check which are necessary
     "scipy",
     "scikit-learn",
     "torchmetrics",
-    "torch>=2.0",
+    "torch==2.5.1",
     "torch_geometric",
+    "lightning",
     "anndata",
     "awkward",
     "scanpy",
+    "leidenalg",
+    "igraph",
     "squidpy",
     "mygene",
+    "geosketch",
+    "networkit>=11.2.1",
 ]
 description = "Steep: Compression Strategies for Efficient Representation of Spatial Transcriptomes"
 readme = "README.md"
@@ -96,3 +102,13 @@ dev = [
     "pytest",
     "python-dotenv"
 ]
+deepspeed = [
+    "deepspeed",
+]
+rapids-cu12 = [
+    "rapids-singlecell-cu12[rapids]",
+]
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com/simple"

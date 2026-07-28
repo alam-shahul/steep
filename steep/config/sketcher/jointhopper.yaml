@@ -1,0 +1,5 @@
+type: steep.sketcher.JointHopperSketcher
+
+args:
+  retention_ratio: 0.1
+  alpha: 0.5

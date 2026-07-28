@@ -1,0 +1,8 @@
+type: steep.sketcher.HybridSpatialExpressionEdgeSketcher
+
+args:
+  retention_ratio: 0.1
+  alpha: 0.5
+  expr_key: X_pca
+  expr_dim: 16
+  cache_scores: true

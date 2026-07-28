@@ -7,8 +7,10 @@ defaults:
   - /optimizer: adamw
   - /scheduler: cosine
   - /trainer: default
+  - /benchmark: default
   - /loss: mse
 
 run_name: run_name
 project: default
+seed: 0
 float_dtype: float32

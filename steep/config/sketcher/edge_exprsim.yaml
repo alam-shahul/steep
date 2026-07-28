@@ -1,0 +1,7 @@
+type: steep.sketcher.ExpressionSimilarityEdgeSketcher
+
+args:
+  retention_ratio: 0.1
+  expr_key: X_pca
+  expr_dim: 16
+  cache_scores: true

@@ -1,0 +1,24 @@
+type: steep.sketcher.MoGSketcher
+
+args:
+  device: cuda
+  epochs: 500
+  lr: 0.01
+  best_score_eval_interval: 10
+  use_topo: true
+  use_expr_prior: true
+  edge_attr_mode: adjacency
+  cache_scores: true
+  sketch_mode: node
+  node_score_mode: source_mean
+  mog_args:
+    retention_ratio: 0.1
+    k_list: [0.1, 0.3, 0.5]
+    hidden_spl: 64
+    num_layers_spl: 2
+    expert_select: 2
+    lam: 1.0
+    topo_loss_coef: 1.0
+    expr_loss_coef: 0.1
+    expr_aug_coef: 0.0
+    expr_topo_mode: both

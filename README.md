@@ -2,6 +2,50 @@
 
 STeep is a set of tools for distilling spatially-resolved transcriptomics (SRT) datasets by removing redundant spots/cells, accelerating downstream applications such as foundation model training and database queries.
 
+# Benchmarking
+
+Run the full-data STAGATE benchmark on the default Zhuang subset with:
+
+```bash
+python scripts/evaluate.py dataset=zhuang_subset benchmark=zhuang
+```
+
+Run the same benchmark with a sketcher:
+
+```bash
+python scripts/evaluate.py dataset=zhuang_subset benchmark=zhuang +sketcher=random_subsample
+```
+
+A more typical benchmark command with common overrides looks like:
+
+```bash
+python scripts/evaluate.py \
+  dataset=zhuang_subset \
+  benchmark=zhuang \
+  +sketcher=random_subsample \
+  sketcher.args.retention_ratio=0.1 \
+  trainer.args.device=cuda \
+  trainer.args.accelerator=gpu \
+  trainer.args.epochs=100 \
+  trainer.args.batchsize=1 \
+  benchmark.args.num_workers=5 \
+  benchmark.args.run_wandb=true \
+  trainer.args.run_wandb=true
+```
+
+This script:
+
+- trains and evaluates full-data STAGATE
+- optionally materializes a sketched dataset and trains STAGATE on it
+- evaluates the sketch-trained model on the original slides
+- writes cached outputs under `/work/magroup/shared/steep/evaluations/<config_hash>/evaluation.json`
+
+To aggregate benchmark outputs into a CSV:
+
+```bash
+python scripts/summarize.py /work/magroup/shared/steep/evaluations /path/to/summary.csv
+```
+
 # Contribution guidelines
 
 <details>

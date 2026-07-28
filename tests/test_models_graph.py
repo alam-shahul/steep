@@ -7,12 +7,12 @@ from steep.models import STAGATE, STAGATEVAE
 def stagate(mock_dim):
     in_dim = mock_dim
     num_hidden = mock_dim
-    out_dim = 2
+    d_model = 2
 
     model = STAGATE(
         in_dim=in_dim,
         num_hidden=num_hidden,
-        out_dim=out_dim,
+        d_model=d_model,
     )
 
     return model
@@ -22,12 +22,12 @@ def stagate(mock_dim):
 def stagate_vae(mock_dim):
     in_dim = mock_dim
     num_hidden = mock_dim
-    out_dim = 2
+    d_model = 2
 
     model = STAGATEVAE(
         in_dim=in_dim,
         num_hidden=num_hidden,
-        out_dim=out_dim,
+        d_model=d_model,
     )
 
     return model

@@ -1,0 +1,5 @@
+type: steep.sketcher.SpatialShortEdgeSketcher
+
+args:
+  retention_ratio: 0.1
+  cache_scores: true
