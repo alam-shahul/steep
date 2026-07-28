@@ -11,6 +11,7 @@ import numpy as np
 import scanpy as sc
 from geosketch import gs
 from loguru import logger
+from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from steep.utils import hopper_sketch_indices, num_edges_from_adata
@@ -26,17 +27,12 @@ except ModuleNotFoundError as exc:
 else:
     _MOG_IMPORT_ERROR = None
 
-import hashlib
-import json
-import time
-from abc import ABC, abstractmethod
-from pathlib import Path
-
 import scipy.sparse as sp
 import torch
 import torch.nn.functional as F
 from scipy.sparse import issparse
 
+from steep.cache import CACHE_SCHEMA_VERSION, MOG_SCORE_CACHE_KEYS
 from steep.models._sparsify import MoG
 from steep.utils._general import hash_config
 
@@ -745,30 +741,21 @@ class MoGSketcher(AnnDataSketcher):
         return node_mask
 
     def _score_cache_key(self, adata: ad.AnnData, input_path: str | Path | None = None) -> str:
+        source = (
+            {
+                "path": str(Path(input_path).resolve()),
+                "size": Path(input_path).stat().st_size,
+            }
+            if input_path is not None
+            else {"n_obs": int(adata.n_obs), "n_vars": int(adata.n_vars)}
+        )
         train_signature = {
-            "input_path": None if input_path is None else str(Path(input_path).resolve()),
-            "random_seed": self.random_seed,
-            "spatial_key": self.spatial_key,
-            "adjacency_matrix_key": self.adjacency_matrix_key,
-            "feature_key": self.feature_key,
-            "expr_prior_key": self.expr_prior_key,
-            "expr_prior_dim": self.expr_prior_dim,
-            "use_topo": self.use_topo,
-            "use_expr_prior": self.use_expr_prior,
-            "edge_attr_mode": self.edge_attr_mode,
-            "epochs": self.epochs,
-            "lr": self.lr,
-            "temp_r": self.temp_r,
-            "temp_N": self.temp_N,
-            "best_score_eval_interval": self.best_score_eval_interval,
+            "schema_version": CACHE_SCHEMA_VERSION,
+            **{key: getattr(self, key) for key in MOG_SCORE_CACHE_KEYS},
             "mog_args": {k: v for k, v in self.mog_args.items() if k != "retention_ratio"},
-            "expr_topo_mode": self.mog_args.get("expr_topo_mode", "both"),
-            "loss_version": "expr_topo_v1",
-            "n_obs": int(adata.n_obs),
-            "n_vars": int(adata.n_vars),
+            "source": source,
         }
-        raw = json.dumps(train_signature, sort_keys=True, default=str)
-        return hashlib.md5(raw.encode()).hexdigest()
+        return hash_config(OmegaConf.create(train_signature))
 
     def _get_score_cache_path(
         self,

@@ -19,6 +19,7 @@ from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
 import wandb
+from steep.cache import TRAINING_CACHE_KEYS, cache_hash_vars
 from steep.dataset import SpatialBlockSubsetDataset, build_spatial_block_node_subsets
 from steep.lightning import (
     build_lightning_callbacks,
@@ -141,18 +142,7 @@ def _resolve_checkpoint_candidate(path_value: str | Path | None) -> Path | None:
 class PyGTrainer:
     """PyG trainer."""
 
-    CHECKPOINT_KEYS = (
-        "run_name",
-        "model",
-        "dataset.args.data_directory",
-        "trainer.args.train_ratio",
-        "trainer.args.val_ratio",
-        "trainer.args.split_type",
-        "trainer.args.spatial_block_grid_size",
-        "sketcher.type",
-        "sketcher.args.retention_ratio",
-        "sketcher.args.random_seed",
-    )
+    CHECKPOINT_KEYS = TRAINING_CACHE_KEYS
 
     def __init__(
         self,
@@ -592,11 +582,14 @@ class PyGTrainer:
     def get_checkpoint_directory(self, additional_keys: tuple = (), hash_vars: tuple = ()):
         cache_dir = Path(self.cfg.cache_dir)
         keys = self.CHECKPOINT_KEYS + additional_keys
+        training_hash_vars = cache_hash_vars(self.cfg.dataset.args.data_directory)
+        if hash_vars:
+            training_hash_vars["additional"] = hash_vars
         checkpoint_directory = get_fully_qualified_cache_paths(
             self.cfg,
             cache_dir / "checkpoints",
             keys=keys,
-            hash_vars=hash_vars,
+            hash_vars=training_hash_vars,
             mkdir=False,
         )
 

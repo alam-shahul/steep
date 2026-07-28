@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import Subset
 
 import wandb
+from steep.cache import EVALUATION_CACHE_KEYS, SKETCH_CACHE_KEYS, cache_hash_vars, dataset_fingerprint
 from steep.trainer import setup_trainer
 from steep.utils import (
     DatasetSummary,
@@ -46,14 +47,6 @@ class EvaluationResult:
     epoch_times_seconds: list[float] | None = None
     epoch_time_mean_seconds: float | None = None
     epoch_time_mean_excluding_first_seconds: float | None = None
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "EvaluationResult":
-        """Rebuild an evaluation result from cached JSON data."""
-        data = dict(data)
-        valid_keys = set(cls.__dataclass_fields__.keys())
-        data = {k: v for k, v in data.items() if k in valid_keys}
-        return cls(**data)
 
 
 @dataclass
@@ -209,18 +202,11 @@ class Benchmark:
         eval_dir = get_fully_qualified_cache_paths(
             trainer_cfg,
             Path(self.cfg.cache_dir) / "evaluations",
-            keys=(
-                "dataset.args.data_directory",
-                "model",
-                "trainer",
-                "sketcher",
-                "benchmark.args.label_keys",
-                "benchmark.args.random_seed",
-                "benchmark.args.n_neighbors",
-                "benchmark.args.leiden_resolution",
-                "benchmark.args.clustering_backend",
-                "benchmark.args.classification_backend",
-            ),
+            keys=EVALUATION_CACHE_KEYS,
+            hash_vars={
+                **cache_hash_vars(trainer_cfg.dataset.args.data_directory),
+                "evaluation_data_fingerprint": dataset_fingerprint(self.cfg.dataset.args.data_directory),
+            },
         )
         eval_dir.mkdir(parents=True, exist_ok=True)
 
@@ -399,33 +385,7 @@ class Benchmark:
             else:
                 logger.info("{} cache hit at {}", stage_name.capitalize(), output_path)
                 with open(output_path) as f:
-                    cached = EvaluationResult.from_dict(json.load(f))
-
-                if cached.classification_metrics_by_label_key is None:
-                    logger.info(
-                        "{} cached evaluation missing classification metrics; backfilling",
-                        stage_name.capitalize(),
-                    )
-                    trainer.warmup_dataloaders()
-                    trainer.fit(resume_from_checkpoint=True)
-                    eval_metrics = self.evaluate_embeddings(
-                        trainer=trainer,
-                        evaluation_data=evaluation_data,
-                        eval_dir=eval_dir,
-                        stage=stage_name,
-                        sketched_data_directory=sketched_data_directory,
-                    )
-
-                    if cached.metrics_by_label_key is None:
-                        cached.metrics_by_label_key = eval_metrics.get("metrics_by_label_key", {})
-                    if cached.label_keys is None:
-                        cached.label_keys = eval_metrics.get("label_keys", list(self.label_keys))
-                    cached.classification_metrics_by_label_key = eval_metrics.get(
-                        "classification_metrics_by_label_key",
-                        {},
-                    )
-                    with open(output_path, "w") as f:
-                        json.dump(serialize_dataclass(cached), f, indent=2)
+                    cached = EvaluationResult(**json.load(f))
                 logger.info("{} config saved to {}", stage_name.capitalize(), config_path)
                 return cached
 
@@ -485,10 +445,16 @@ class Benchmark:
         """Build or reuse a cached sketched dataset on disk."""
 
         input_dir = Path(self.cfg.dataset.args.data_directory)
+        sketch_cache_cfg = OmegaConf.create(OmegaConf.to_container(self.cfg, resolve=True))
+        sketcher_args = OmegaConf.select(sketch_cache_cfg, "sketcher.args")
+        if sketcher_args is not None:
+            sketcher_args.pop("cache_scores", None)
+            sketcher_args.pop("cache_directory", None)
         output_dir = get_fully_qualified_cache_paths(
-            self.cfg,
+            sketch_cache_cfg,
             Path(self.cfg.cache_dir) / "sketches",
-            keys=("dataset.args.data_directory", "sketcher"),
+            keys=SKETCH_CACHE_KEYS,
+            hash_vars=cache_hash_vars(input_dir),
         )
         if not self.resume_from_checkpoint and output_dir.exists():
             logger.info("Sketch dataset cache ignored for fresh run at {}", output_dir)
