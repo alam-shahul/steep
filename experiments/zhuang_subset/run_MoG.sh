@@ -9,8 +9,8 @@
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 
-name=mog_edge
-OUTDIR="/work/magroup/xinyuelu/steep/experiments/zhuang_subset/records/$name"
+name=mog
+OUTDIR="${STEEP_RECORDS_DIR:-experiments/zhuang_subset/records}/$name"
 mkdir -p "$OUTDIR"
 
 ratios=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9)

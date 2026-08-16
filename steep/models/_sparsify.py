@@ -89,7 +89,14 @@ class MoE(nn.Module):
             ],
         )
 
-        self.w_gate = nn.Parameter(torch.zeros(input_size, num_experts), requires_grad=True)
+        # A zero-initialized gate gives every node identical logits, so at
+        # eval time `topk` breaks the tie the same way for all of them and the
+        # whole graph routes to one expert -- the mixture collapses to a single
+        # fixed sparsity. Initialize it so routing is data-dependent from the
+        # start. `w_noise` stays at zero: softplus(0) is the intended default
+        # noise scale for the load-balancing estimator.
+        self.w_gate = nn.Parameter(torch.empty(input_size, num_experts), requires_grad=True)
+        nn.init.xavier_normal_(self.w_gate, gain=1.0)
         self.w_noise = nn.Parameter(torch.zeros(input_size, num_experts), requires_grad=True)
 
         self.lam = float(lam)
@@ -142,11 +149,18 @@ class MoE(nn.Module):
 
         self.topo_val = topo_val
 
-    def _build_expr_topo_target(self, x):
-        """Build one merged expression-aware topology target per edge.
+    def _build_expr_topo_channels(self, x):
+        """Build the expression-aware topology target channels.
 
-        Returns:
-            prior_target: [num_edges], or None
+        Returns a ``[num_edges, num_channels]`` tensor, or ``None``.
+
+        Callers must NOT collapse this with a plain row-mean. Under
+        ``expr_topo_mode="both"`` the channels are ``topo * expr`` concatenated
+        with ``topo * (1 - expr)``, so an unweighted mean is
+        ``0.5 * mean(topo)`` -- the expression term cancels exactly and the
+        prior degenerates to ``expr_topo_mode="none"``. Channels are instead
+        assigned per expert in :meth:`forward`, mirroring the upstream MoG,
+        which keeps them distinct and gives the experts different targets.
 
         """
         if self.topo_val is None:
@@ -178,9 +192,7 @@ class MoE(nn.Module):
             else:
                 raise ValueError(f"Unsupported expr_topo_mode: {self.expr_topo_mode}")
 
-        prior_target = prior_features.mean(dim=1)
-        prior_target = prior_target.clamp(0.0, 1.0)
-        return prior_target
+        return prior_features.clamp(0.0, 1.0)
 
     def cv_squared(self, x):
         eps_local = 1e-10
@@ -226,6 +238,14 @@ class MoE(nn.Module):
         top_k_logits = top_logits[:, : self.k]
         top_k_indices = top_indices[:, : self.k]
         top_k_gates = self.softmax(top_k_logits)
+
+        # With `expert_select == 1` a softmax over a single logit is identically
+        # 1.0, so `top_k_gates` is constant and `w_gate` receives no gradient
+        # from any downstream loss. Rescaling by the router's confidence over
+        # ALL experts leaves the forward value untouched (the ratio is 1) while
+        # restoring a gradient path to `w_gate`.
+        confidence = torch.softmax(logits, dim=1).gather(1, top_k_indices)
+        top_k_gates = top_k_gates * (confidence / confidence.detach().clamp_min(eps))
 
         zeros = torch.zeros_like(logits, requires_grad=True)
         gates = zeros.scatter(1, top_k_indices, top_k_gates)
@@ -366,14 +386,31 @@ class MoE(nn.Module):
         gated_masked_score = torch.sum(edge_gates * expert_masked_scores, dim=1)
 
         # --------------------------------------------------
-        # 3) merged expression-aware topology prior loss
+        # 3) expression-aware topology prior loss
         # --------------------------------------------------
-        prior_target = self._build_expr_topo_target(x)
+        prior_channels = self._build_expr_topo_channels(x)
 
-        if prior_target is not None:
+        if prior_channels is not None:
+            # One channel per expert (cycling if there are more experts than
+            # channels), then weight by the same gates used for the scores.
+            # A plain row-mean would cancel the expression term -- see
+            # `_build_expr_topo_channels`.
+            channel_index = torch.arange(self.num_experts, device=x.device) % prior_channels.size(1)
+            expert_targets = prior_channels.index_select(1, channel_index)
+            prior_target = torch.sum(edge_gates * expert_targets, dim=1)
             loss_prior = F.mse_loss(gated_prob, prior_target)
         else:
+            prior_target = None
             loss_prior = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+
+        # Expression similarity as a loss in its own right. The topology scores
+        # are close to uninformative on a Delaunay spatial graph (they separate
+        # same-cell-type edges at chance level), so this term carries the signal.
+        if self.expr_prior is not None:
+            expr_target = self.expr_prior.to(device=x.device, dtype=x.dtype).clamp(0.0, 1.0)
+            loss_expr = F.mse_loss(gated_prob, expr_target)
+        else:
+            loss_expr = torch.tensor(0.0, device=x.device, dtype=x.dtype)
 
         # --------------------------------------------------
         # 4) selection score
@@ -411,7 +448,7 @@ class MoE(nn.Module):
             mask=local_mask,
         )
 
-        total_loss = loss_balance + self.topo_loss_coef * loss_prior
+        total_loss = loss_balance + self.topo_loss_coef * loss_prior + self.expr_loss_coef * loss_expr
 
         return {
             "mask": final_mask,
@@ -421,8 +458,9 @@ class MoE(nn.Module):
             "loss": total_loss,
             "loss_balance": loss_balance.detach(),
             "loss_topo": loss_prior.detach(),
-            "loss_expr": torch.tensor(0.0, device=x.device).detach(),
+            "loss_expr": loss_expr.detach(),
             "loss_prior": loss_prior.detach(),
+            "k_per_node": k_per_node.detach(),
         }
 
 

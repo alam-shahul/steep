@@ -1,3 +1,9 @@
+from steep.utils._classification import (
+    ClassificationLabelStore,
+    accumulate_classification_results,
+    evaluate_slide_classification,
+    summarize_classification_scores,
+)
 from steep.utils._cluster import (
     LabelMetricStore,
     MetricAccumulator,
@@ -31,9 +37,14 @@ from steep.utils._preprocess import preprocess
 from steep.utils._pyg import add_self_loops, anndata_to_pyg, draw_graph, laplacian, pyg_to_anndata, remove_self_loops
 from steep.utils._scheduler import get_scheduler
 from steep.utils._sketch import hopper_sketch_indices
+from steep.utils._spatial_metrics import neighbourhood_composition_divergence, neighbourhood_enrichment_agreement
 
 __all__ = [
     draw_graph.__name__,
+    ClassificationLabelStore.__name__,
+    accumulate_classification_results.__name__,
+    evaluate_slide_classification.__name__,
+    summarize_classification_scores.__name__,
     laplacian.__name__,
     remove_self_loops.__name__,
     add_self_loops.__name__,
@@ -61,6 +72,8 @@ __all__ = [
     iter_evaluation_results.__name__,
     save_slide_clustering_plot.__name__,
     hopper_sketch_indices.__name__,
+    neighbourhood_composition_divergence.__name__,
+    neighbourhood_enrichment_agreement.__name__,
     get_scheduler.__name__,
     preprocess.__name__,
     compute_spatial_neighbors.__name__,

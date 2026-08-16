@@ -11,7 +11,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_RECORDS_DIR = Path("/work/magroup/xinyuelu/steep/experiments/zhuang_subset/records")
+DEFAULT_RECORDS_DIR = Path("experiments/zhuang_subset/records")
 DEFAULT_EVAL_ROOT = Path("/work/magroup/shared/steep/evaluations")
 
 

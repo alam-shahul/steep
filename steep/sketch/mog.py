@@ -158,6 +158,7 @@ class MoGSketcher(AnnDataSketcher):
             z = adata.obsm[self.expr_prior_key]
             z = np.asarray(z)
             z = z[:, : self.expr_prior_dim]
+            z = np.ascontiguousarray(z)
             z = torch.tensor(z, dtype=torch.float32, device=self.device)
             return z
 
@@ -297,7 +298,13 @@ class MoGSketcher(AnnDataSketcher):
         out.obsp[self.adjacency_matrix_key] = adj_sub
         return out
 
-    def _mask_from_score(self, edge_score: torch.Tensor) -> torch.Tensor:
+    def _mask_from_score(
+        self,
+        edge_score: torch.Tensor,
+        edge_index: torch.Tensor,
+        num_nodes: int,
+    ) -> torch.Tensor:
+        """Keep the highest-scoring undirected edge pairs."""
         ratio = self.mog_args.get("retention_ratio", None)
         num_edges = edge_score.numel()
 
@@ -311,13 +318,26 @@ class MoGSketcher(AnnDataSketcher):
         if not (0 < ratio <= 1):
             raise ValueError(f"retention_ratio must be in (0, 1], got {ratio}")
 
-        k = max(1, int(np.ceil(num_edges * ratio)))
-        k = min(k, num_edges)
+        src, dst = edge_index
+        low = torch.minimum(src, dst)
+        high = torch.maximum(src, dst)
+        pair_key = low.to(torch.int64) * num_nodes + high.to(torch.int64)
+        _, inverse = torch.unique(pair_key, return_inverse=True)
+        num_pairs = int(inverse.max().item()) + 1
 
-        top_idx = torch.topk(edge_score, k=k, largest=True).indices
-        mask = torch.zeros(num_edges, dtype=torch.bool, device=edge_score.device)
-        mask[top_idx] = True
-        return mask
+        pair_score = torch.full(
+            (num_pairs,),
+            -float("inf"),
+            dtype=edge_score.dtype,
+            device=edge_score.device,
+        )
+        pair_score.scatter_reduce_(0, inverse, edge_score, reduce="amax", include_self=True)
+
+        keep_count = min(max(1, int(np.ceil(num_pairs * ratio))), num_pairs)
+        kept_pairs = torch.topk(pair_score, k=keep_count, largest=True).indices
+        pair_mask = torch.zeros(num_pairs, dtype=torch.bool, device=edge_score.device)
+        pair_mask[kept_pairs] = True
+        return pair_mask[inverse]
 
     def _node_mask_from_edge_score(
         self,
@@ -383,7 +403,7 @@ class MoGSketcher(AnnDataSketcher):
             "temp_N": self.temp_N,
             "mog_args": {k: v for k, v in self.mog_args.items() if k != "retention_ratio"},
             "expr_topo_mode": self.mog_args.get("expr_topo_mode", "both"),
-            "loss_version": "expr_topo_v1",
+            "loss_version": "expr_topo_v2",
             "n_obs": int(adata.n_obs),
             "n_vars": int(adata.n_vars),
         }
@@ -482,7 +502,7 @@ class MoGSketcher(AnnDataSketcher):
         orig_edges = int(adata.obsp[self.adjacency_matrix_key].nnz)
 
         if self.sketch_mode == "edge":
-            edge_mask = self._mask_from_score(best_score)
+            edge_mask = self._mask_from_score(best_score, edge_index, adata.n_obs)
             new_edge_index = edge_index[:, edge_mask]
 
             new_edge_values = torch.ones(

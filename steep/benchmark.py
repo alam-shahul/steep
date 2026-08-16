@@ -1,5 +1,6 @@
 import json
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,8 @@ from steep.utils import (
     get_fully_qualified_cache_paths,
     instantiate_from_config,
     iter_evaluation_results,
+    neighbourhood_composition_divergence,
+    neighbourhood_enrichment_agreement,
     serialize_dataclass,
     summarize_classification_scores,
     summarize_cluster_scores,
@@ -84,6 +87,7 @@ class SketchResult:
     sketch_time_seconds: float
     output_directory: str | None = None
     evaluation: EvaluationResult | None = None
+    spatial_metrics: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SketchResult":
@@ -182,11 +186,53 @@ class Benchmark:
         sketch = SketchResult(
             output_directory=str(sketched_dir),
             evaluation=sketch_evaluation,
+            spatial_metrics=self._evaluate_spatial_structure(sketched_dir),
             **sketch_metrics,
         )
         self._merge_sketch_agreement(sketch, sketched_module, sketched_datamodule, sketched_trainer)
 
         return sketch
+
+    def _evaluate_spatial_structure(self, sketched_dir: Path) -> dict[str, Any] | None:
+        """Summarize graph-structure preservation across sketched slides."""
+        stores: dict[str, dict[str, list[tuple[float, int]]]] = {key: defaultdict(list) for key in self.label_keys}
+        original_dir = Path(self.cfg.dataset.args.data_directory)
+
+        for original_path in sorted(original_dir.glob("*.h5ad")):
+            sketched_path = sketched_dir / original_path.name
+            if not sketched_path.exists():
+                continue
+
+            original = ad.read_h5ad(original_path)
+            sketched = ad.read_h5ad(sketched_path)
+            for label_key in self.label_keys:
+                divergence = neighbourhood_composition_divergence(original, sketched, label_key)
+                agreement = neighbourhood_enrichment_agreement(original, sketched, label_key)
+                if divergence is not None:
+                    stores[label_key]["composition_jsd"].append(
+                        (divergence["composition_jsd_mean"], divergence["count"]),
+                    )
+                    stores[label_key]["emptied"].append(
+                        (divergence["emptied_neighbourhood_frac"], divergence["shared_count"]),
+                    )
+                if agreement is not None:
+                    stores[label_key]["enrichment_spearman"].append((agreement["enrichment_spearman"], 1))
+
+        summary: dict[str, Any] = {}
+        for label_key, metrics in stores.items():
+            label_summary = {}
+            for name, values in metrics.items():
+                total_weight = sum(weight for _, weight in values)
+                label_summary[f"{name}_mean"] = float(np.mean([value for value, _ in values]))
+                if total_weight:
+                    label_summary[f"{name}_weighted_mean"] = (
+                        sum(value * weight for value, weight in values) / total_weight
+                    )
+                label_summary[f"{name}_sections"] = len(values)
+            if label_summary:
+                summary[label_key] = label_summary
+
+        return summary or None
 
     def _merge_sketch_agreement(self, sketch, sketched_module, sketched_datamodule, sketched_trainer) -> None:
         """Add original-clustering agreement metrics to a sketch evaluation."""

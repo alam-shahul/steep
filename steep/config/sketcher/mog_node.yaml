@@ -30,5 +30,5 @@ args:
   temp_N: 1
   cache_scores: true
   cache_directory: ${cache_dir}/mog_scores
-  sketch_mode: edge
+  sketch_mode: node
   node_score_mode: source_mean

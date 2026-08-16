@@ -6,9 +6,11 @@
 #SBATCH --gres=gpu:1
 #SBATCH -t 1-23:00:00
 #SBATCH --array=0-44   # 9 ratios × 5 seeds = 45 jobs
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 
 name=edge_spatiallong
-OUTDIR="/work/magroup/xinyuelu/steep/experiments/zhuang_subset/records/$name"
+OUTDIR="${STEEP_RECORDS_DIR:-experiments/zhuang_subset/records}/$name"
 mkdir -p $OUTDIR
 
 ratios=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9)

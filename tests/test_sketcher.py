@@ -3,9 +3,10 @@ from pathlib import Path
 
 import anndata as ad
 import numpy as np
+import torch
 from omegaconf import OmegaConf
 
-from steep.sketch import HopperSketcher, RandomSubsampleSketcher
+from steep.sketch import HopperSketcher, MoGSketcher, RandomSubsampleSketcher
 
 
 def _make_adata(num_cells: int = 10, num_genes: int = 4) -> ad.AnnData:
@@ -85,3 +86,30 @@ def test_hopper_sketcher_fit_transform_to_disk_returns_metadata(tmp_path: Path):
     assert metadata.original_num_cells == 10
     assert metadata.sketched_num_cells == 4
     assert metadata.compression_ratio == 0.4
+
+
+def test_mog_edge_mask_applies_retention_to_undirected_pairs():
+    sketcher = MoGSketcher(
+        mog_args={
+            "k_list": [0.25, 0.5],
+            "hidden_spl": 4,
+            "num_layers_spl": 2,
+            "expert_select": 1,
+            "retention_ratio": 0.5,
+        },
+        device="cpu",
+        use_topo=False,
+        use_expr_prior=False,
+        cache_scores=False,
+    )
+    edge_index = torch.tensor(
+        [
+            [0, 1, 1, 2, 2, 3, 3, 0],
+            [1, 0, 2, 1, 3, 2, 0, 3],
+        ],
+    )
+    edge_score = torch.tensor([0.9, 0.8, 0.7, 0.6, 0.2, 0.1, 0.4, 0.3])
+
+    mask = sketcher._mask_from_score(edge_score, edge_index, num_nodes=4)
+
+    assert mask.tolist() == [True, True, True, True, False, False, False, False]
