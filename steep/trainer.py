@@ -369,8 +369,11 @@ class PyGTrainer:
         print("==> Initialized Run")
 
     def _initialize_lr_scheduler(self):
-        global_batch_size = self.batchsize
-        total_steps = len(self.dataloaders["train"].dataset) // global_batch_size * self.epochs
+        batches_per_epoch = len(self.dataloaders["train"])
+        optimizer_steps_per_epoch = (
+            batches_per_epoch + self.accumulate_grad_batches - 1
+        ) // self.accumulate_grad_batches
+        total_steps = optimizer_steps_per_epoch * self.epochs
         warmup_ratio = self.cfg.scheduler.args.warmup_ratio
         warmup_step = int(warmup_ratio * total_steps)
 
