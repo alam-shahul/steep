@@ -1,0 +1,11 @@
+type: steep.sketcher.SpatialLongEdgeSketcher
+
+args:
+  retention_ratio: 0.3
+  random_seed: 0
+  adjacency_matrix_key: adjacency_matrix
+  spatial_key: spatial
+  symmetrize: true
+  drop_isolated_cells: true
+  cache_scores: true
+  cache_directory: /work/magroup/shared/steep/edge_score_cache

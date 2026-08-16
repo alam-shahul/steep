@@ -1,0 +1,69 @@
+type: steep.sketcher.MoGSketcher
+
+args:
+  sketch_mode: node
+  node_score_mode: source_mean
+  # Bug-fixed merged implementation (steep/models/_sparsify.py):
+  #   - `expr_topo_mode: both` no longer cancels the expression term
+  #   - `expr_loss_coef` is wired into the total loss again
+  #   - prior channels are assigned per expert instead of row-mean pooled
+  # Ablation (records/ablation_topo_expr.json) shows the topology term is worth
+  # +0.001 edge purity at ratio 0.3 and that expr-only beats topo+expr, so this
+  # variant drops the topology prior entirely: topo_loss_coef and lam are 0.
+  # Expression similarity is the only prior left.
+  mog_impl: new
+  edge_selection: undirected
+  edge_budget: per_node
+
+  # -------------------------
+  # MoG core
+  # -------------------------
+  mog_args:
+    k_list: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    hidden_spl: 128
+    num_layers_spl: 2
+    expert_select: 1
+    lam: 0.0
+    topo_loss_coef: 0.0
+    expr_loss_coef: 1.0
+    retention_ratio: 0.3
+    expr_aug_coef: 0.5
+    expr_topo_mode: intra
+
+  # -------------------------
+  # training
+  # -------------------------
+  epochs: 50
+  lr: 0.001
+  temp_r: 0.001
+  temp_N: 1
+
+  # -------------------------
+  # device
+  # -------------------------
+  device: cpu
+
+  # -------------------------
+  # data keys
+  # -------------------------
+  spatial_key: spatial
+  adjacency_matrix_key: adjacency_matrix
+  feature_key:
+  expr_prior_key: X_pca
+  expr_prior_dim: 16
+
+  # -------------------------
+  # behavior
+  # -------------------------
+  use_topo: false
+  use_expr_prior: true
+  edge_attr_mode: adjacency
+  symmetrize: true
+  drop_isolated_cells: true
+
+  # -------------------------
+  # reproducibility
+  # -------------------------
+  random_seed: 0
+  cache_scores: true
+  cache_directory: /work/magroup/shared/steep/checkpoints

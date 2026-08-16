@@ -1,5 +1,6 @@
 import json
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ from steep.utils import (
     get_fully_qualified_cache_paths,
     instantiate_from_config,
     iter_evaluation_results,
+    neighbourhood_composition_divergence,
+    neighbourhood_enrichment_agreement,
     serialize_dataclass,
     summarize_classification_scores,
     summarize_cluster_scores,
@@ -78,6 +81,10 @@ class SketchResult:
     sketch_time_seconds: float
     output_directory: str | None = None
     evaluation: EvaluationResult | None = None
+    # Structure-preservation metrics computed directly from the sketched h5ad
+    # files, with no model involved. Kept outside `evaluation` so the cached
+    # `evaluation.json` files stay readable by older code.
+    spatial_metrics: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SketchResult":
@@ -141,11 +148,65 @@ class Benchmark:
         sketch = SketchResult(
             output_directory=str(sketched_dir),
             evaluation=sketch_evaluation,
+            spatial_metrics=self._evaluate_spatial_structure(sketched_dir),
             **sketch_metrics,
         )
         self._merge_sketch_agreement(sketch, sketched_trainer)
 
         return sketch
+
+    def _evaluate_spatial_structure(self, sketched_dir: Path) -> dict[str, Any] | None:
+        """Score how much of the spatial structure the sketch kept.
+
+        Every other metric in this benchmark reads only embeddings and labels,
+        so shuffling the coordinates while keeping the graph would leave them
+        unchanged. These two read the spatial graph itself, per section, and are
+        averaged over sections weighted by evaluated cells.
+
+        """
+        label_keys = list(self.label_keys or [])
+        if not label_keys:
+            return None
+
+        original_dir = Path(self.cfg.dataset.args.data_directory)
+        stores: dict[str, dict[str, list]] = {key: defaultdict(list) for key in label_keys}
+
+        for original_path in sorted(original_dir.glob("*.h5ad")):
+            sketched_path = Path(sketched_dir) / original_path.name
+            if not sketched_path.exists():
+                continue
+
+            original = ad.read_h5ad(original_path)
+            sketched = ad.read_h5ad(sketched_path)
+
+            for key in label_keys:
+                divergence = neighbourhood_composition_divergence(original, sketched, key)
+                agreement = neighbourhood_enrichment_agreement(original, sketched, key)
+                if divergence is not None:
+                    stores[key]["composition_jsd"].append((divergence["composition_jsd_mean"], divergence["count"]))
+                    # Weighted by all shared cells, which is this fraction's
+                    # own denominator -- `count` counts only evaluable ones.
+                    stores[key]["emptied"].append(
+                        (divergence["emptied_neighbourhood_frac"], divergence["shared_count"]),
+                    )
+                if agreement is not None:
+                    stores[key]["enrichment_spearman"].append((agreement["enrichment_spearman"], 1))
+
+        summary: dict[str, Any] = {}
+        for key, metrics in stores.items():
+            per_key = {}
+            for name, pairs in metrics.items():
+                if not pairs:
+                    continue
+                total = sum(weight for _, weight in pairs)
+                per_key[f"{name}_mean"] = float(np.mean([value for value, _ in pairs]))
+                if total > 0:
+                    per_key[f"{name}_weighted_mean"] = sum(v * w for v, w in pairs) / total
+                per_key[f"{name}_sections"] = len(pairs)
+            if per_key:
+                summary[key] = per_key
+
+        return summary or None
 
     def _merge_sketch_agreement(self, sketch: SketchResult, sketched_trainer) -> None:
         """Add original-clustering agreement metrics to a sketch evaluation."""
@@ -190,6 +251,36 @@ class Benchmark:
 
         return eval_dir
 
+    # Config paths that may hold a sketcher's retention ratio, in priority order.
+    # `MoGSketcher` nests its ratio under `mog_args` instead of exposing it directly.
+    RETENTION_RATIO_KEYS = (
+        "sketcher.args.retention_ratio",
+        "sketcher.args.mog_args.retention_ratio",
+    )
+
+    def _resolve_baseline_retention_ratio(self) -> float:
+        """Find the configured sketcher's retention ratio for baseline masking.
+
+        The baseline classifier must be trained on the same fraction of cells
+        that the sketcher would have kept, otherwise baseline and sketch scores
+        are not comparable.
+
+        """
+        for key in self.RETENTION_RATIO_KEYS:
+            value = OmegaConf.select(self.cfg, key, default=None)
+            if value is not None:
+                return float(value)
+
+        if "sketcher" in self.cfg:
+            print(
+                "> WARNING: a sketcher is configured but no retention ratio was found at "
+                f"{self.RETENTION_RATIO_KEYS}; baseline classification will use "
+                f"classification_train_ratio={self.classification_train_ratio} and will NOT be "
+                "comparable to the sketch run.",
+            )
+
+        return float(self.classification_train_ratio)
+
     def _build_train_masks(
         self,
         slide_records,
@@ -217,12 +308,7 @@ class Benchmark:
                 sketched_adata.file.close()
                 train_masks[record.slide_name] = np.isin(record.obs_names, list(sketched_obs_names))
         else:
-            retention_ratio = OmegaConf.select(
-                self.cfg,
-                "sketcher.args.retention_ratio",
-                default=self.classification_train_ratio,
-            )
-            retention_ratio = float(retention_ratio)
+            retention_ratio = float(self._resolve_baseline_retention_ratio())
             rng = np.random.default_rng(self.random_seed)
             for record in slide_records:
                 n = len(record.obs_names)

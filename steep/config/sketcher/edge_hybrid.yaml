@@ -1,0 +1,14 @@
+type: steep.sketcher.HybridSpatialExpressionEdgeSketcher
+
+args:
+  retention_ratio: 0.3
+  alpha: 0.5
+  random_seed: 0
+  adjacency_matrix_key: adjacency_matrix
+  spatial_key: spatial
+  symmetrize: true
+  drop_isolated_cells: true
+  expr_key: X_pca
+  expr_dim: 16
+  cache_scores: true
+  cache_directory: /work/magroup/shared/steep/edge_score_cache

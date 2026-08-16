@@ -31,6 +31,15 @@ LOG_NAME_RE = re.compile(
 
 EDGE_METHOD_NAME_TO_TYPE = {
     "mog": "steep.sketcher.MoGSketcher",
+    "mog_edge": "steep.sketcher.MoGSketcher",
+    "mog_edge_old": "steep.sketcher.MoGSketcher",
+    "mog_edge_fixed": "steep.sketcher.MoGSketcher",
+    "mog_edge_v2": "steep.sketcher.MoGSketcher",
+    "mog_edge_v3": "steep.sketcher.MoGSketcher",
+    "mog_edge_joint": "steep.sketcher.MoGSketcher",
+    "mog_edge_distill": "steep.sketcher.MoGSketcher",
+    "mog_edge_pernode": "steep.sketcher.MoGSketcher",
+    "mog_edge_adaptive": "steep.sketcher.MoGSketcher",
     "edge_random": "steep.sketcher.RandomEdgeSketcher",
     "edge_spatialshort": "steep.sketcher.SpatialShortEdgeSketcher",
     "edge_spatiallong": "steep.sketcher.SpatialLongEdgeSketcher",
@@ -41,6 +50,14 @@ EDGE_METHOD_NAME_TO_TYPE = {
 
 NODE_METHOD_NAME_TO_TYPE = {
     "mog_node": "steep.sketcher.MoGSketcher",
+    "mog_node_old": "steep.sketcher.MoGSketcher",
+    "mog_node_fixed": "steep.sketcher.MoGSketcher",
+    "mog_node_v2": "steep.sketcher.MoGSketcher",
+    "mog_node_v3": "steep.sketcher.MoGSketcher",
+    "mog_node_joint": "steep.sketcher.MoGSketcher",
+    "mog_node_distill": "steep.sketcher.MoGSketcher",
+    "mog_node_pernode": "steep.sketcher.MoGSketcher",
+    "mog_node_adaptive": "steep.sketcher.MoGSketcher",
     "geosketch": "steep.sketcher.GeoSketcher",
     "hopper": "steep.sketcher.HopperSketcher",
     "jointhopper": "steep.sketcher.JointHopperSketcher",
@@ -65,6 +82,15 @@ METHOD_GROUP = {
 METHOD_NAME_DISPLAY = {
     # edge-based
     "mog": "mog",
+    "mog_edge": "mog_edge",
+    "mog_edge_old": "mog_edge_old",
+    "mog_edge_fixed": "mog_edge_fixed",
+    "mog_edge_v2": "mog_edge_v2",
+    "mog_edge_v3": "mog_edge_v3",
+    "mog_edge_joint": "mog_edge_joint",
+    "mog_edge_distill": "mog_edge_distill",
+    "mog_edge_pernode": "mog_edge_pernode",
+    "mog_edge_adaptive": "mog_edge_adaptive",
     "edge_random": "edge_random",
     "edge_spatialshort": "edge_spatialshort",
     "edge_spatiallong": "edge_spatiallong",
@@ -72,6 +98,14 @@ METHOD_NAME_DISPLAY = {
     "edge_hybrid": "edge_hybrid",
     # node-based
     "mog_node": "mog_node",
+    "mog_node_old": "mog_node_old",
+    "mog_node_fixed": "mog_node_fixed",
+    "mog_node_v2": "mog_node_v2",
+    "mog_node_v3": "mog_node_v3",
+    "mog_node_joint": "mog_node_joint",
+    "mog_node_distill": "mog_node_distill",
+    "mog_node_pernode": "mog_node_pernode",
+    "mog_node_adaptive": "mog_node_adaptive",
     "geosketch": "geosketch",
     "hopper": "hopper",
     "jointhopper": "jointhopper",
@@ -83,6 +117,15 @@ METHOD_NAME_DISPLAY = {
 
 EDGE_METHOD_ORDER = [
     "mog",
+    "mog_edge",
+    "mog_edge_old",
+    "mog_edge_fixed",
+    "mog_edge_v2",
+    "mog_edge_v3",
+    "mog_edge_joint",
+    "mog_edge_distill",
+    "mog_edge_pernode",
+    "mog_edge_adaptive",
     "edge_random",
     "edge_spatialshort",
     "edge_spatiallong",
@@ -93,6 +136,14 @@ EDGE_METHOD_ORDER = [
 
 NODE_METHOD_ORDER = [
     "mog_node",
+    "mog_node_old",
+    "mog_node_fixed",
+    "mog_node_v2",
+    "mog_node_v3",
+    "mog_node_joint",
+    "mog_node_distill",
+    "mog_node_pernode",
+    "mog_node_adaptive",
     "random_subsample",
     "geosketch",
     "hopper",
@@ -104,6 +155,15 @@ NODE_METHOD_ORDER = [
 
 EDGE_METHOD_PALETTE = {
     "mog": "#D55E00",
+    "mog_edge": "#D55E00",
+    "mog_edge_old": "#8C3B00",
+    "mog_edge_fixed": "#E1670A",
+    "mog_edge_v2": "#B10DC9",
+    "mog_edge_v3": "#4B0082",
+    "mog_edge_joint": "#008B8B",
+    "mog_edge_distill": "#B8860B",
+    "mog_edge_pernode": "#E7298A",
+    "mog_edge_adaptive": "#1B7837",
     "edge_random": "#7A7A7A",
     "edge_spatialshort": "#0072B2",
     "edge_spatiallong": "#56B4E9",
@@ -114,6 +174,14 @@ EDGE_METHOD_PALETTE = {
 
 NODE_METHOD_PALETTE = {
     "mog_node": "#D55E00",
+    "mog_node_old": "#8C3B00",
+    "mog_node_fixed": "#E1670A",
+    "mog_node_v2": "#B10DC9",
+    "mog_node_v3": "#4B0082",
+    "mog_node_joint": "#008B8B",
+    "mog_node_distill": "#B8860B",
+    "mog_node_pernode": "#E7298A",
+    "mog_node_adaptive": "#1B7837",
     "random_subsample": "#7A7A7A",
     "geosketch": "#E69F00",
     "hopper": "#0072B2",
@@ -294,6 +362,52 @@ def load_evaluation_json(eval_json: Path) -> dict[str, Any] | None:
         return None
 
 
+def parse_summary_json_from_log(log_path: Path) -> dict[str, Any] | None:
+    """Recover the summary that ``scripts/evaluate.py`` prints to stdout.
+
+    The benchmark writes its metrics both to a cached ``evaluation.json`` and
+    to stdout. When the shared cache directory has been pruned, the log body
+    is the only surviving copy.
+
+    """
+    text = read_log_text(log_path)
+    if text is None:
+        return None
+
+    decoder = json.JSONDecoder()
+    summary = None
+    start = 0
+
+    # `json.dumps(..., indent=2)` puts the opening brace alone on its own line.
+    while True:
+        index = text.find("\n{\n", start)
+        if index < 0:
+            break
+        try:
+            candidate, end = decoder.raw_decode(text, index + 1)
+        except json.JSONDecodeError:
+            start = index + 1
+            continue
+        if isinstance(candidate, dict) and ("sketch" in candidate or "baseline" in candidate):
+            summary = candidate
+        start = max(end, index + 1)
+
+    return summary
+
+
+def evaluation_from_log_summary(log_path: Path) -> dict[str, Any] | None:
+    """Extract the sketch evaluation block from a log-embedded summary."""
+    summary = parse_summary_json_from_log(log_path)
+    if summary is None:
+        return None
+
+    evaluation = (summary.get("sketch") or {}).get("evaluation")
+    if isinstance(evaluation, dict):
+        return evaluation
+
+    return None
+
+
 def fallback_eval_json_from_checkpoint(
     log_path: Path,
     eval_root: Path,
@@ -333,13 +447,17 @@ def build_row_from_log(
         if checkpoint_id is None:
             checkpoint_id = fallback_checkpoint_id
 
-    if eval_json is None:
-        print(f"Skipping {log_path}: neither evaluation_json nor checkpoint id found in log.")
-        return None
+    evaluation = load_evaluation_json(eval_json) if eval_json is not None else None
+    metrics_source = "evaluation_json"
 
-    evaluation = load_evaluation_json(eval_json)
+    # The shared evaluation cache is pruned periodically; fall back to the copy
+    # that `scripts/evaluate.py` printed into the log itself.
     if evaluation is None:
-        print(f"Skipping {log_path}: evaluation.json not found or invalid at {eval_json}.")
+        evaluation = evaluation_from_log_summary(log_path)
+        metrics_source = "log"
+
+    if evaluation is None:
+        print(f"Skipping {log_path}: no metrics in evaluation.json ({eval_json}) nor in the log body.")
         return None
 
     short_name = short_method_name_from_folder(method_name)
@@ -349,8 +467,9 @@ def build_row_from_log(
         "method_group": method_group,
         "log_path": str(log_path),
         "checkpoint_id": checkpoint_id,
-        "evaluation_json": str(eval_json),
-        "evaluation_directory": str(eval_json.parent),
+        "evaluation_json": str(eval_json) if eval_json is not None else "",
+        "evaluation_directory": str(eval_json.parent) if eval_json is not None else "",
+        "metrics_source": metrics_source,
         "condition": "sketch",
         "sketcher.type": method_type,
         "sketcher.short_name": short_name,
@@ -520,6 +639,13 @@ def plot_panel(
     ax.grid(alpha=0.2)
 
 
+# Spatial-structure metrics, written by Benchmark._evaluate_spatial_structure.
+# These read the spatial graph directly; the clustering metrics do not, and are
+# unchanged if the coordinates are shuffled.
+SPATIAL_JSD_KEY = "spatial_metrics.subclass.composition_jsd_mean"
+SPATIAL_RHO_KEY = "spatial_metrics.subclass.enrichment_spearman_mean"
+
+
 def write_plot(
     rows: list[dict[str, Any]],
     output_path: Path,
@@ -529,6 +655,8 @@ def write_plot(
     nmi_key = f"evaluation.metrics_by_label_key.{label_key}.nmi_mean"
 
     nmi_scores = group_metric_by_method_and_x(rows, nmi_key)
+    jsd_scores = group_metric_by_method_and_x(rows, SPATIAL_JSD_KEY)
+    rho_scores = group_metric_by_method_and_x(rows, SPATIAL_RHO_KEY)
 
     gpu_memory_scores_raw = group_metric_by_method_and_x(
         rows,
@@ -566,33 +694,25 @@ def write_plot(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(1, 3, figsize=(11.5, 4))
+    # Spatial structure first: those panels are the ones that can tell a
+    # spatially-informed sketch from one that ignores geometry. NMI, memory and
+    # runtime follow as context.
+    panels = [
+        (jsd_scores, "neighbourhood composition JSD", f"{group} spatial: composition drift (lower better)"),
+        (rho_scores, "enrichment agreement (rho)", f"{group} spatial: architecture kept (higher better)"),
+        (nmi_scores, f"NMI ({label_key})", f"{group} NMI"),
+        (gpu_memory_scores, "GPU Memory (GiB)", f"{group} Memory"),
+        (runtime_scores, "Runtime (s)", f"{group} Runtime"),
+    ]
+    panels = [(scores, ylabel, title) for scores, ylabel, title in panels if scores]
 
-    plot_panel(
-        axes[0],
-        nmi_scores,
-        ylabel=f"NMI ({label_key})",
-        title=f"{group} NMI",
-        group=group,
-    )
+    fig, axes = plt.subplots(1, len(panels), figsize=(4.0 * len(panels), 4))
+    axes = np.atleast_1d(axes)
 
-    plot_panel(
-        axes[1],
-        gpu_memory_scores,
-        ylabel="GPU Memory (GiB)",
-        title=f"{group} Memory",
-        group=group,
-    )
+    for ax, (scores, ylabel, title) in zip(axes, panels):
+        plot_panel(ax, scores, ylabel=ylabel, title=title, group=group)
 
-    plot_panel(
-        axes[2],
-        runtime_scores,
-        ylabel="Runtime (s)",
-        title=f"{group} Runtime",
-        group=group,
-    )
-
-    handles, labels = axes[0].get_legend_handles_labels()
+    handles, labels = axes[0].get_legend_handles_labels()  # every panel shares the same methods
 
     order = group_method_order(group)
     idx_order = sorted(

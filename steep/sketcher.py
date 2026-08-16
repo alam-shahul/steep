@@ -300,6 +300,14 @@ class MoGSketcher(AnnDataSketcher):
         cache_directory: str | None = None,
         sketch_mode: str = "edge",  # "edge" / "node"
         node_score_mode: str = "source_mean",  # "source_mean" / "incident_mean"
+        mog_impl: str = "new",  # "new" (merged expr-topo prior) / "old" (separate topo + expr losses)
+        edge_selection: str = "directed",  # "undirected" matches the other edge sketchers
+        expr_prior_mode: str = "similarity",  # "similarity" / "boundary" / "both"
+        edge_budget: str = "global",  # "global" top-k, or "per_node" from the MoE gates
+        train_mode: str = "surrogate",  # "surrogate" / "joint" / "distill"
+        density_target_mode: str = "none",  # "none" / "heterogeneity"
+        stagate_hidden: int = 128,
+        stagate_d_model: int = 30,
     ):
         self.mog_args = dict(mog_args)
         self.random_seed = int(random_seed)
@@ -323,9 +331,41 @@ class MoGSketcher(AnnDataSketcher):
 
         self.sketch_mode = sketch_mode
         self.node_score_mode = node_score_mode
+        self.mog_impl = mog_impl
+        self.edge_selection = edge_selection
+        self.expr_prior_mode = expr_prior_mode
+        self.edge_budget = edge_budget
+        self.train_mode = train_mode
+        self.density_target_mode = density_target_mode
+        self.stagate_hidden = int(stagate_hidden)
+        self.stagate_d_model = int(stagate_d_model)
 
         if self.sketch_mode not in {"edge", "node"}:
             raise ValueError(f"Unsupported sketch_mode: {self.sketch_mode}")
+
+        if self.mog_impl not in {"new", "old"}:
+            raise ValueError(f"Unsupported mog_impl: {self.mog_impl}")
+
+        if self.edge_selection not in {"directed", "undirected"}:
+            raise ValueError(f"Unsupported edge_selection: {self.edge_selection}")
+
+        if self.expr_prior_mode not in {"similarity", "boundary", "both"}:
+            raise ValueError(f"Unsupported expr_prior_mode: {self.expr_prior_mode}")
+
+        if self.edge_budget not in {"global", "per_node"}:
+            raise ValueError(f"Unsupported edge_budget: {self.edge_budget}")
+
+        if self.train_mode not in {"surrogate", "joint", "distill"}:
+            raise ValueError(f"Unsupported train_mode: {self.train_mode}")
+
+        if self.density_target_mode not in {"none", "heterogeneity"}:
+            raise ValueError(f"Unsupported density_target_mode: {self.density_target_mode}")
+
+        if self.train_mode != "surrogate" and self.mog_impl == "old":
+            raise ValueError("train_mode='joint'/'distill' need mog_impl='new'.")
+
+        if self.edge_budget == "per_node" and self.mog_impl == "old":
+            raise ValueError("edge_budget='per_node' needs mog_impl='new'; the legacy MoE returns no usable mask.")
 
         if self.node_score_mode not in {"source_mean", "incident_mean"}:
             raise ValueError(f"Unsupported node_score_mode: {self.node_score_mode}")
@@ -400,6 +440,8 @@ class MoGSketcher(AnnDataSketcher):
             z = adata.obsm[self.expr_prior_key]
             z = np.asarray(z)
             z = z[:, : self.expr_prior_dim]
+            # `sc.tl.pca` can return arrays with negative strides, which torch rejects.
+            z = np.ascontiguousarray(z)
             z = torch.tensor(z, dtype=torch.float32, device=self.device)
             return z
 
@@ -408,23 +450,142 @@ class MoGSketcher(AnnDataSketcher):
             z = z[:, : self.expr_prior_dim]
         return z
 
+    def _neighbourhood_profile(self, edge_index: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """Mean embedding of each cell's spatial neighbours.
+
+        A cell's own state says what it is; the mean of its neighbours says what
+        tissue context it sits in. Two cells deep inside the same region share a
+        context, two cells straddling a boundary do not.
+
+        """
+        src, dst = edge_index[0], edge_index[1]
+        total = torch.zeros_like(z)
+        count = torch.zeros(z.size(0), 1, dtype=z.dtype, device=z.device)
+        total.index_add_(0, src, z[dst])
+        count.index_add_(0, src, torch.ones(src.size(0), 1, dtype=z.dtype, device=z.device))
+        return total / count.clamp(min=1.0)
+
+    def _neighbourhood_heterogeneity(self, edge_index: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """Per-node target for how much edge budget a neighbourhood deserves.
+
+        A cell deep inside a homogeneous region sees neighbours that all look
+        like each other, so most of its edges are redundant and a small budget
+        loses nothing. A cell on a boundary, or next to a rare type, sees a
+        mixed neighbourhood where every edge carries distinct information.
+
+        Heterogeneity is the mean cosine distance from each neighbour to the
+        neighbourhood mean -- label-free, so no leakage. It is rescaled onto the
+        `k_list` range because that is the quantity the router actually emits.
+
+        """
+        src, dst = edge_index[0], edge_index[1]
+        profile = self._neighbourhood_profile(edge_index, z)
+        deviation = 1.0 - F.cosine_similarity(z[dst], profile[src], dim=1)
+
+        total = torch.zeros(z.size(0), dtype=z.dtype, device=z.device)
+        count = torch.zeros_like(total)
+        total.index_add_(0, src, deviation)
+        count.index_add_(0, src, torch.ones_like(deviation))
+        heterogeneity = total / count.clamp(min=1.0)
+
+        low, high = heterogeneity.min(), heterogeneity.max()
+        normalized = (heterogeneity - low) / (high - low + 1e-12)
+
+        k_list = torch.tensor(self.mog_args["k_list"], dtype=z.dtype, device=z.device)
+        return k_list.min() + normalized * (k_list.max() - k_list.min())
+
     def _compute_expr_prior(
         self,
         adata: ad.AnnData,
         edge_index: torch.Tensor,
         features: torch.Tensor,
     ) -> torch.Tensor:
+        """Per-edge prior in [0, 1]; higher means the edge should be kept.
+
+        ``similarity`` keeps edges between transcriptionally similar cells --
+        the same signal `ExpressionSimilarityEdgeSketcher` uses, which already
+        separates same-cell-type edges at AUROC ~0.96 without any training.
+        ``boundary`` instead keeps edges whose endpoints sit in *different*
+        neighbourhood contexts, i.e. edges that trace tissue boundaries, which
+        plain expression similarity actively discards.
+
+        """
         z = self._get_expr_prior_features(adata, features)
-        src = edge_index[0]
-        dst = edge_index[1]
-        expr_prior = F.cosine_similarity(z[src], z[dst], dim=1)
-        expr_prior = (expr_prior + 1.0) / 2.0
-        return expr_prior
+        src, dst = edge_index[0], edge_index[1]
+
+        if self.expr_prior_mode == "similarity":
+            prior = F.cosine_similarity(z[src], z[dst], dim=1)
+            return (prior + 1.0) / 2.0
+
+        profile = self._neighbourhood_profile(edge_index, z)
+        context_similarity = F.cosine_similarity(profile[src], profile[dst], dim=1)
+        boundary = 1.0 - (context_similarity + 1.0) / 2.0
+
+        if self.expr_prior_mode == "boundary":
+            return boundary
+
+        # "both": average the two, so within-region and boundary edges are
+        # both preferred over edges that are neither.
+        similarity = (F.cosine_similarity(z[src], z[dst], dim=1) + 1.0) / 2.0
+        return 0.5 * (similarity + boundary)
+
+    def _resolve_mog_class(self):
+        """Select the MoG implementation requested by ``mog_impl``."""
+        if self.mog_impl == "old":
+            from steep.models._sparsify_old import MoG as MoGClass
+
+            return MoGClass
+        return MoG
+
+    def _train_with_downstream(self, features, edge_index, edge_attr):
+        """Train the pruner against the downstream model instead of a surrogate.
+
+        `joint` optimizes the pruner and STAGATE together, as upstream MoG does.
+        `distill` fits STAGATE on the dense graph once, freezes it, and trains
+        the pruner so the sparsified graph reproduces its embeddings.
+
+        """
+        from steep.models._joint import DistillSparsifier, JointSparsifier
+
+        sparsifier_class = JointSparsifier if self.train_mode == "joint" else DistillSparsifier
+        sparsifier = sparsifier_class(
+            num_features=features.size(1),
+            mog_args=self.mog_args,
+            device=self.device,
+            num_hidden=self.stagate_hidden,
+            d_model=self.stagate_d_model,
+            lr=self.lr,
+            epochs=self.epochs,
+            temp_r=self.temp_r,
+            temp_n=self.temp_N,
+            use_topo=self.use_topo,
+        )
+        history = sparsifier.fit(
+            features,
+            edge_index,
+            edge_attr,
+            expr_prior=self._cached_expr_prior,
+        )
+        best_score, best_mask = sparsifier.edge_scores(features, edge_index, edge_attr)
+
+        final = history[-1] if history else {}
+        objective = final.get("task", final.get("distill", float("nan")))
+        aux = {
+            "loss_balance": float(final.get("aux", 0.0)),
+            "loss_topo": 0.0,
+            "loss_expr": 0.0,
+        }
+        return best_score, best_mask, float(objective), aux
 
     def _train_mog(self, features, edge_index, edge_attr):
+        if self.train_mode != "surrogate":
+            return self._train_with_downstream(features, edge_index, edge_attr)
+
         num_features = features.size(1)
 
-        model = MoG(
+        mog_class = self._resolve_mog_class()
+
+        model = mog_class(
             num_features=num_features,
             device=self.device,
             k_list=self.mog_args["k_list"],
@@ -451,8 +612,12 @@ class MoGSketcher(AnnDataSketcher):
         else:
             model.learner.expr_prior = None
 
+        model.learner.density_target = self._cached_density_target
+        model.learner.density_loss_coef = float(self.mog_args.get("density_loss_coef", 0.0))
+
         best_loss = float("inf")
         best_score = None
+        best_mask = None
         best_aux = None
 
         for epoch in range(1, self.epochs + 1):
@@ -486,6 +651,10 @@ class MoGSketcher(AnnDataSketcher):
             if eval_loss < best_loss:
                 best_loss = eval_loss
                 best_score = eval_out["edge_score"].detach().clone()
+                # `local_mask` is the per-node budget the MoE gates chose, before
+                # `_enforce_retention_ratio` overwrites it to hit a global quota.
+                best_mask = eval_out.get("local_mask")
+                best_mask = None if best_mask is None else best_mask.detach().clone().bool()
                 best_aux = {
                     "loss_balance": float(eval_out["loss_balance"].item()),
                     "loss_topo": float(eval_out["loss_topo"].item()),
@@ -495,7 +664,7 @@ class MoGSketcher(AnnDataSketcher):
         if best_score is None:
             raise RuntimeError("MoG did not produce a valid score.")
 
-        return best_score, best_loss, best_aux
+        return best_score, best_mask, best_loss, best_aux
 
     def _edge_index_to_adj(
         self,
@@ -537,7 +706,22 @@ class MoGSketcher(AnnDataSketcher):
         out.obsp[self.adjacency_matrix_key] = adj_sub
         return out
 
-    def _mask_from_score(self, edge_score: torch.Tensor) -> torch.Tensor:
+    def _mask_from_score(
+        self,
+        edge_score: torch.Tensor,
+        edge_index: torch.Tensor | None = None,
+        num_nodes: int | None = None,
+    ) -> torch.Tensor:
+        """Select the edges to keep, honouring ``retention_ratio``.
+
+        ``edge_selection="undirected"`` groups the two directions of each edge
+        and keeps the top ``retention_ratio`` fraction of *undirected* edges,
+        matching :class:`EdgeScoreSketcherBase`. The legacy ``"directed"`` mode
+        takes the top-k over the directed edge list and then symmetrizes, which
+        roughly doubles the kept edges and makes MoG incomparable to the other
+        edge sketchers at the same nominal ratio.
+
+        """
         ratio = self.mog_args.get("retention_ratio", None)
         num_edges = edge_score.numel()
 
@@ -551,13 +735,37 @@ class MoGSketcher(AnnDataSketcher):
         if not (0 < ratio <= 1):
             raise ValueError(f"retention_ratio must be in (0, 1], got {ratio}")
 
-        k = max(1, int(np.ceil(num_edges * ratio)))
-        k = min(k, num_edges)
+        if self.edge_selection == "directed" or edge_index is None:
+            k = min(max(1, int(np.ceil(num_edges * ratio))), num_edges)
+            top_idx = torch.topk(edge_score, k=k, largest=True).indices
+            mask = torch.zeros(num_edges, dtype=torch.bool, device=edge_score.device)
+            mask[top_idx] = True
+            return mask
 
-        top_idx = torch.topk(edge_score, k=k, largest=True).indices
-        mask = torch.zeros(num_edges, dtype=torch.bool, device=edge_score.device)
-        mask[top_idx] = True
-        return mask
+        # Collapse (i, j) and (j, i) onto one undirected edge, scored by the
+        # stronger of the two directions.
+        src, dst = edge_index[0], edge_index[1]
+        low = torch.minimum(src, dst)
+        high = torch.maximum(src, dst)
+        pair_key = low.to(torch.int64) * int(num_nodes) + high.to(torch.int64)
+
+        _, inverse = torch.unique(pair_key, return_inverse=True)
+        num_pairs = int(inverse.max().item()) + 1
+
+        pair_score = torch.full(
+            (num_pairs,),
+            -float("inf"),
+            dtype=edge_score.dtype,
+            device=edge_score.device,
+        )
+        pair_score = pair_score.scatter_reduce(0, inverse, edge_score, reduce="amax", include_self=True)
+
+        k = min(max(1, int(np.ceil(num_pairs * ratio))), num_pairs)
+        top_pairs = torch.topk(pair_score, k=k, largest=True).indices
+
+        keep_pair = torch.zeros(num_pairs, dtype=torch.bool, device=edge_score.device)
+        keep_pair[top_pairs] = True
+        return keep_pair[inverse]
 
     def _node_mask_from_edge_score(
         self,
@@ -621,9 +829,22 @@ class MoGSketcher(AnnDataSketcher):
             "lr": self.lr,
             "temp_r": self.temp_r,
             "temp_N": self.temp_N,
-            "mog_args": {k: v for k, v in self.mog_args.items() if k != "retention_ratio"},
+            # Surrogate training never sees the ratio -- it only enters at mask
+            # time -- so scores are reusable across ratios. joint/distill train
+            # STAGATE through the ratio-enforced mask, so their scores are
+            # ratio-specific and the key must say so.
+            "mog_args": {
+                k: v for k, v in self.mog_args.items() if k != "retention_ratio" or self.train_mode != "surrogate"
+            },
             "expr_topo_mode": self.mog_args.get("expr_topo_mode", "both"),
             "loss_version": "expr_topo_v1",
+            "mog_impl": self.mog_impl,
+            "expr_prior_mode": self.expr_prior_mode,
+            "edge_budget": self.edge_budget,
+            "train_mode": self.train_mode,
+            "density_target_mode": self.density_target_mode,
+            "stagate_hidden": self.stagate_hidden,
+            "stagate_d_model": self.stagate_d_model,
             "n_obs": int(adata.n_obs),
             "n_vars": int(adata.n_vars),
         }
@@ -650,12 +871,14 @@ class MoGSketcher(AnnDataSketcher):
         cache_path: Path,
         edge_index: torch.Tensor,
         best_score: torch.Tensor,
+        best_mask: torch.Tensor | None,
         best_loss: float,
         best_aux: dict,
     ) -> None:
         payload = {
             "edge_index": edge_index.detach().cpu(),
             "best_score": best_score.detach().cpu(),
+            "best_mask": None if best_mask is None else best_mask.detach().cpu(),
             "best_loss": float(best_loss),
             "best_aux": best_aux,
         }
@@ -666,6 +889,7 @@ class MoGSketcher(AnnDataSketcher):
         return (
             payload["edge_index"],
             payload["best_score"],
+            payload.get("best_mask"),
             payload["best_loss"],
             payload["best_aux"],
         )
@@ -695,17 +919,24 @@ class MoGSketcher(AnnDataSketcher):
         else:
             self._cached_expr_prior = None
 
+        if self.density_target_mode == "heterogeneity":
+            z = self._get_expr_prior_features(adata, features)
+            self._cached_density_target = self._neighbourhood_heterogeneity(edge_index, z)
+        else:
+            self._cached_density_target = None
+
         cache_path = self._get_score_cache_path(adata, input_path=input_path)
 
         if cache_path is not None and cache_path.exists():
-            cached_edge_index, best_score, best_loss, best_aux = self._load_score_cache(cache_path)
+            cached_edge_index, best_score, best_mask, best_loss, best_aux = self._load_score_cache(cache_path)
             cached_edge_index = cached_edge_index.to(edge_index.device)
             best_score = best_score.to(edge_index.device)
+            best_mask = None if best_mask is None else best_mask.to(edge_index.device)
 
             if cached_edge_index.shape != edge_index.shape or not torch.equal(cached_edge_index, edge_index):
                 raise RuntimeError("Cached edge_index does not match current edge_index.")
         else:
-            best_score, best_loss, best_aux = self._train_mog(
+            best_score, best_mask, best_loss, best_aux = self._train_mog(
                 features=features,
                 edge_index=edge_index,
                 edge_attr=edge_attr,
@@ -715,6 +946,7 @@ class MoGSketcher(AnnDataSketcher):
                     cache_path=cache_path,
                     edge_index=edge_index,
                     best_score=best_score,
+                    best_mask=best_mask,
                     best_loss=best_loss,
                     best_aux=best_aux,
                 )
@@ -722,7 +954,16 @@ class MoGSketcher(AnnDataSketcher):
         orig_edges = int(adata.obsp[self.adjacency_matrix_key].nnz)
 
         if self.sketch_mode == "edge":
-            edge_mask = self._mask_from_score(best_score)
+            if self.edge_budget == "per_node":
+                # Keep exactly what the MoE gates asked for per source node. The
+                # realized retention is whatever that adds up to, so runs must be
+                # compared against baselines at their measured retention, not at
+                # the nominal ratio.
+                if best_mask is None:
+                    raise RuntimeError("edge_budget='per_node' requires a cached per-node mask; clear the cache.")
+                edge_mask = best_mask
+            else:
+                edge_mask = self._mask_from_score(best_score, edge_index=edge_index, num_nodes=adata.n_obs)
             new_edge_index = edge_index[:, edge_mask]
 
             new_edge_values = torch.ones(

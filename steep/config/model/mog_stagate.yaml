@@ -1,0 +1,15 @@
+type: steep.models.MoG_STAGATE
+
+args:
+  num_hidden: 512
+  d_model: 30
+  emb_dim: 128
+  edge_dim: 0
+  temp: 1.0
+  device: cpu
+  mog_args:
+    k_list: [0.25, 0.5, 0.75]
+    hidden_spl: 128
+    num_layers_spl: 2
+    expert_select: 2
+    lam: 1.0

@@ -70,8 +70,8 @@ class STAGATE(nn.Module):
             bias=False,
         )
 
-    def encode(self, features, edge_index):
-        h1 = F.elu(self.conv1(features, edge_index))
+    def encode(self, features, edge_index, edge_weight=None):
+        h1 = F.elu(self.conv1(features, edge_index, edge_weight=edge_weight))
         h2 = self.conv2(h1, edge_index, attention=False)
 
         return h2
@@ -93,18 +93,22 @@ class STAGATE(nn.Module):
 
     #     return h4
 
-    def decode(self, h2, edge_index):
+    def decode(self, h2, edge_index, edge_weight=None):
         """Decoding without tied weights."""
-        h3 = F.elu(self.conv3(h2, edge_index, attention=True))
+        h3 = F.elu(self.conv3(h2, edge_index, attention=True, edge_weight=edge_weight))
         h4 = self.conv4(h3, edge_index, attention=False)
 
         return h4
 
-    def forward(self, data):
+    def forward(self, data, edge_weight=None):
         features = data.x
         edge_index = data.edge_index
-        h2 = self.encode(features, edge_index)
-        h4 = self.decode(h2, edge_index)
+        # A soft edge mask may be supplied by the caller (joint training) or
+        # carried on the graph; `None` reproduces the original dense behaviour.
+        if edge_weight is None:
+            edge_weight = getattr(data, "edge_weight", None)
+        h2 = self.encode(features, edge_index, edge_weight=edge_weight)
+        h4 = self.decode(h2, edge_index, edge_weight=edge_weight)
         outputs = {
             "embedding": h2,
             "logits": h4,
@@ -302,6 +306,7 @@ class GATConv(MessagePassing):
         return_attention_weights=None,
         attention=True,
         tied_attention=None,
+        edge_weight: OptTensor = None,
     ):
         # type: (Union[Tensor, OptPairTensor], Tensor, Size, NoneType) -> Tensor  # noqa
         # type: (Union[Tensor, OptPairTensor], SparseTensor, Size, NoneType) -> Tensor  # noqa
@@ -353,13 +358,21 @@ class GATConv(MessagePassing):
                 if x_dst is not None:
                     num_nodes = min(num_nodes, x_dst.size(0))
                 num_nodes = min(size) if size is not None else num_nodes
-                edge_index, _ = remove_self_loops(edge_index)
-                edge_index, _ = add_self_loops(edge_index, num_nodes=num_nodes)
+                edge_index, edge_weight = remove_self_loops(edge_index, edge_weight)
+                # Self-loops carry weight 1 so a masked graph never loses a node
+                # entirely; without this `edge_weight` would be shorter than
+                # `edge_index` and silently misalign.
+                edge_index, edge_weight = add_self_loops(
+                    edge_index,
+                    edge_weight,
+                    fill_value=1.0,
+                    num_nodes=num_nodes,
+                )
             elif isinstance(edge_index, torch_sparse.SparseTensor):
                 edge_index = torch_sparse.set_diag(edge_index)
 
-        # propagate_type: (x: OptPairTensor, alpha: OptPairTensor)
-        out = self.propagate(edge_index, x=x, alpha=alpha, size=size)
+        # propagate_type: (x: OptPairTensor, alpha: OptPairTensor, edge_weight: OptTensor)
+        out = self.propagate(edge_index, x=x, alpha=alpha, edge_weight=edge_weight, size=size)
 
         alpha = self._alpha
         assert alpha is not None
@@ -389,6 +402,7 @@ class GATConv(MessagePassing):
         index: Tensor,
         ptr: OptTensor,
         size_i: Optional[int],
+        edge_weight: OptTensor = None,
     ) -> Tensor:
         # Given egel-level attention coefficients for source and target nodes,
         # we simply need to sum them up to "emulate" concatenation:
@@ -399,6 +413,13 @@ class GATConv(MessagePassing):
         alpha = softmax(alpha, index, ptr, size_i)
         self._alpha = alpha  # Save for later use.
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
+
+        if edge_weight is not None:
+            # Applied after the attention softmax so a soft mask scales each
+            # message without being renormalized away. Gradients flow back to
+            # whatever produced the weight, which is what joint training needs.
+            alpha = alpha * edge_weight.view(-1, 1)
+
         return x_j * alpha.unsqueeze(-1)
 
     def __repr__(self):

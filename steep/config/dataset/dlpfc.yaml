@@ -1,0 +1,5 @@
+name: dlpfc
+type: steep.dataset.SRTDataset
+
+args:
+  data_directory: ${data_path}/dlpfc_test

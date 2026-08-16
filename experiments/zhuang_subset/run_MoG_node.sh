@@ -8,6 +8,8 @@
 #SBATCH --array=0-44
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 
 name=mog_node
 OUTDIR="/work/magroup/xinyuelu/steep/experiments/zhuang_subset/records/$name"

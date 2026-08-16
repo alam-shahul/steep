@@ -6,6 +6,8 @@
 #SBATCH --gres=gpu:1
 #SBATCH -t 1-23:00:00
 #SBATCH --array=0-44   # 9 ratios × 5 seeds = 45 jobs
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 
 name=jointhopper
 OUTDIR="/work/magroup/xinyuelu/steep/experiments/zhuang_subset/records/$name"

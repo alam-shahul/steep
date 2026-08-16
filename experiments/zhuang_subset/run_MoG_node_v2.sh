@@ -5,13 +5,14 @@
 #SBATCH --mem 50G
 #SBATCH --gres=gpu:1
 #SBATCH -t 1-23:00:00
-#SBATCH --array=0-44
-#SBATCH --output=/dev/null
-#SBATCH --error=/dev/null
+#SBATCH --array=0-44   # 9 ratios x 5 seeds = 45 jobs
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 
-name=mog_edge
+# Node-mode MoG using the pre-merge sparsifier (steep/models/_sparsify_old.py),
+# selected via `sketcher.args.mog_impl=old` in the mog_node_old config.
+
+name=mog_node_v2
 OUTDIR="/work/magroup/xinyuelu/steep/experiments/zhuang_subset/records/$name"
 mkdir -p "$OUTDIR"
 
@@ -38,7 +39,9 @@ echo "Retention ratio: ${ratio}"
 echo "Random seed: ${seed}"
 echo
 
-uv run python scripts/evaluate.py \
+cd /work/magroup/xinyuelu/steep || exit 1
+
+uv run --no-sync python scripts/evaluate.py \
   dataset=zhuang_subset \
   benchmark=zhuang \
   +sketcher="$name" \

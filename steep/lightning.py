@@ -212,23 +212,18 @@ def build_lightning_callbacks(results_folder: Path, enable_lr_monitor: bool = Tr
         _EpochTimerCallback(),
         ModelCheckpoint(
             dirpath=str(results_folder),
-            filename="epoch{epoch:04d}",
+            filename="last",
             auto_insert_metric_name=False,
             save_last=True,
-            save_top_k=-1,
+            save_top_k=0,
             every_n_epochs=1,
-        ),
-        ModelCheckpoint(
-            dirpath=str(results_folder),
-            filename="best",
-            auto_insert_metric_name=False,
-            monitor="val_loss",
-            mode="min",
-            save_top_k=1,
+            enable_version_counter=False,
         ),
     ]
+
     if enable_lr_monitor:
         callbacks.append(LearningRateMonitor(logging_interval="step"))
+
     return callbacks
 
 

@@ -1,0 +1,5 @@
+name: brain_pretrain
+type: steep.dataset.SRTDataset
+
+args:
+  data_directory: ${data_path}/combined_subset/pretrain
