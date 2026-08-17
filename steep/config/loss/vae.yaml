@@ -1,4 +1,4 @@
 type: steep.loss.VAELoss
 
 args:
-  total_epochs: ${trainer.args.epochs}
+  total_epochs: ${trainer.args.max_epochs}

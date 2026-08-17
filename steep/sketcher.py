@@ -8,33 +8,14 @@ from pathlib import Path
 import anndata as ad
 import numpy as np
 import scanpy as sc
-from geosketch import gs
-
-from steep.utils import hopper_sketch_indices, num_edges_from_adata
-
-try:
-    from steep.trainer import PyGTrainer
-except ModuleNotFoundError as exc:
-    _MOG_IMPORT_ERROR = exc
-
-    class PyGTrainer:  # type: ignore[no-redef]
-        pass
-
-else:
-    _MOG_IMPORT_ERROR = None
-
-import hashlib
-import json
-import time
-from abc import ABC, abstractmethod
-from pathlib import Path
-
 import scipy.sparse as sp
 import torch
 import torch.nn.functional as F
+from geosketch import gs
 from scipy.sparse import issparse
 
 from steep.models._sparsify import MoG
+from steep.utils import hopper_sketch_indices, num_edges_from_adata
 
 
 @dataclass

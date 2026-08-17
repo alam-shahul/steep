@@ -1,15 +1,8 @@
-type: steep.trainer.PyGTrainer
+type: lightning.pytorch.Trainer
 
 args:
-  train_ratio: 0.8
-  val_ratio: 0.1
-  split_type: random
-  spatial_block_grid_size: 4
-  epochs: 1
-  shuffle: true
-  batchsize: 2
-  device: cuda
-  grad_norm_clip: 1.0
+  max_epochs: 1
+  gradient_clip_val: 1.0
   accelerator: gpu
   devices: auto
   strategy: deepspeed_stage_2
@@ -19,7 +12,3 @@ args:
   enable_progress_bar: true
   enable_model_summary: false
   num_sanity_val_steps: 0
-  num_workers: null
-  persistent_workers: null
-  pin_memory: null
-  run_wandb: false

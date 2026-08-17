@@ -542,7 +542,7 @@ def write_plot(
 
     runtime_scores = group_metric_by_method_and_x(
         rows,
-        "evaluation.epoch_time_mean_seconds",
+        "evaluation.epoch_time_mean_excluding_first_seconds",
     )
 
     if not nmi_scores:
@@ -587,8 +587,8 @@ def write_plot(
     plot_panel(
         axes[2],
         runtime_scores,
-        ylabel="Runtime (s)",
-        title=f"{group} Runtime",
+        ylabel="Steady-State Epoch Runtime (s)",
+        title=f"{group} Steady-State Runtime",
         group=group,
     )
 

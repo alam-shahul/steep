@@ -7,10 +7,16 @@ from typing import Any
 import anndata as ad
 import numpy as np
 import torch
-import wandb
 from omegaconf import OmegaConf
 
-from steep.trainer import setup_trainer
+import wandb
+from steep.lightning import (
+    build_lightning_callbacks,
+    build_wandb_logger,
+    cleanup_distributed,
+    finalize_lightning_logger,
+)
+from steep.training import infer_num_genes, initialize_checkpointing, load_pretrained_weights, prepare_resume_checkpoint
 from steep.utils import (
     ClassificationLabelStore,
     DatasetSummary,
@@ -95,6 +101,8 @@ class Benchmark:
     def __init__(
         self,
         cfg,
+        module,
+        datamodule,
         trainer,
         label_keys: list[str] | tuple[str, ...] = (),
         num_workers: int = 1,
@@ -107,6 +115,8 @@ class Benchmark:
         classification_max_iter: int = 1000,
     ):
         self.cfg = cfg
+        self.module = module
+        self.datamodule = datamodule
         self.trainer = trainer
         self.label_keys = tuple(label_keys)
         self.num_workers = int(num_workers)
@@ -121,8 +131,10 @@ class Benchmark:
     def _run_baseline(self) -> EvaluationResult:
         """Run the full-data baseline benchmark."""
         return self._run_training_evaluation(
+            module=self.module,
+            datamodule=self.datamodule,
             trainer=self.trainer,
-            evaluation_data=self.trainer.data,
+            evaluation_data=self.datamodule.data,
             sketched_data_directory=None,
         )
 
@@ -132,10 +144,39 @@ class Benchmark:
         sketched_cfg = OmegaConf.create(OmegaConf.to_container(self.cfg, resolve=True))
         sketched_cfg.dataset.args.data_directory = str(sketched_dir)
         sketched_cfg.run_name = f"{self.cfg.run_name}_sketched"
-        sketched_trainer = setup_trainer(sketched_cfg)
+        sketched_data = instantiate_from_config(sketched_cfg.dataset)
+        sketched_datamodule = instantiate_from_config(sketched_cfg.datamodule, data=sketched_data)
+        sketched_model = instantiate_from_config(sketched_cfg.model, in_dim=infer_num_genes(sketched_cfg))
+        sketched_loss = instantiate_from_config(sketched_cfg.loss)
+        sketched_module = instantiate_from_config(
+            sketched_cfg.lightning_module,
+            cfg=sketched_cfg,
+            model=sketched_model,
+            loss_function=sketched_loss,
+        )
+        sketched_results_folder = initialize_checkpointing(sketched_cfg)
+        sketched_logger = build_wandb_logger(sketched_cfg, bool(sketched_cfg.run_wandb))
+        sketched_callbacks = build_lightning_callbacks(
+            sketched_results_folder,
+            enable_lr_monitor=bool(sketched_logger),
+            enable_progress_bar=bool(sketched_cfg.trainer.args.enable_progress_bar),
+        )
+        sketched_trainer = instantiate_from_config(
+            sketched_cfg.trainer,
+            default_root_dir=str(sketched_results_folder),
+            callbacks=sketched_callbacks,
+            logger=sketched_logger or False,
+        )
+        load_pretrained_weights(
+            sketched_model,
+            sketched_cfg.get("pretrained_ckpt_path"),
+            device="cpu",
+        )
         sketch_evaluation = self._run_training_evaluation(
+            module=sketched_module,
+            datamodule=sketched_datamodule,
             trainer=sketched_trainer,
-            evaluation_data=self.trainer.data,
+            evaluation_data=self.datamodule.data,
             sketched_data_directory=sketched_dir,
         )
         sketch = SketchResult(
@@ -143,20 +184,22 @@ class Benchmark:
             evaluation=sketch_evaluation,
             **sketch_metrics,
         )
-        self._merge_sketch_agreement(sketch, sketched_trainer)
+        self._merge_sketch_agreement(sketch, sketched_module, sketched_datamodule, sketched_trainer)
 
         return sketch
 
-    def _merge_sketch_agreement(self, sketch: SketchResult, sketched_trainer) -> None:
+    def _merge_sketch_agreement(self, sketch, sketched_module, sketched_datamodule, sketched_trainer) -> None:
         """Add original-clustering agreement metrics to a sketch evaluation."""
         if "original_leiden" in (sketch.evaluation.metrics_by_label_key or {}):
             return
 
         sketch_agreement = evaluate_sketch_cluster_agreement(
-            reference_trainer=self.trainer,
-            reference_data=self.trainer.data,
-            target_trainer=sketched_trainer,
-            target_data=sketched_trainer.data,
+            reference_model=self.module.model,
+            reference_device=self.module.device,
+            reference_data=self.datamodule.data,
+            target_model=sketched_module.model,
+            target_device=sketched_module.device,
+            target_data=sketched_datamodule.data,
             embedding_eval_num_workers=self.num_workers,
             random_seed=self.random_seed,
             n_neighbors=self.n_neighbors,
@@ -240,7 +283,7 @@ class Benchmark:
 
     def evaluate_embeddings(
         self,
-        trainer,
+        module,
         eval_dir: str | Path,
         evaluation_data=None,
         sketched_data_directory: str | Path | None = None,
@@ -248,8 +291,9 @@ class Benchmark:
         """Cluster slide embeddings, score them, classify cell types, write
         plots."""
         slide_records = extract_slide_embedding_records(
-            trainer=trainer,
+            model=module.model,
             evaluation_data=evaluation_data,
+            device=module.device,
             label_keys=self.label_keys,
             progress_desc="Extracting Embeddings",
         )
@@ -330,12 +374,14 @@ class Benchmark:
 
     def _run_training_evaluation(
         self,
+        module,
+        datamodule,
         trainer,
         evaluation_data,
         sketched_data_directory: str | Path | None = None,
     ) -> EvaluationResult:
         """Run training evaluation on a particular data object."""
-        eval_dir = self.get_eval_dir(trainer.cfg)
+        eval_dir = self.get_eval_dir(module.cfg)
 
         output_path = eval_dir / "evaluation.json"
         if output_path.exists():
@@ -343,11 +389,19 @@ class Benchmark:
                 cached = EvaluationResult.from_dict(json.load(f))
 
             if cached.classification_metrics_by_label_key is None:
-                print(f"> Cached evaluation missing classification metrics; backfilling from checkpoint.")
-                trainer.warmup_dataloaders()
-                trainer.fit(resume_from_checkpoint=self.resume_from_checkpoint)
+                print("> Cached evaluation missing classification metrics; backfilling from checkpoint.")
+                resume_path, _ = prepare_resume_checkpoint(
+                    module.model,
+                    Path(trainer.default_root_dir),
+                    enabled=self.resume_from_checkpoint,
+                )
+                try:
+                    trainer.fit(module, datamodule=datamodule, ckpt_path=resume_path)
+                finally:
+                    finalize_lightning_logger(trainer.logger)
+                    cleanup_distributed()
                 eval_metrics = self.evaluate_embeddings(
-                    trainer=trainer,
+                    module=module,
                     evaluation_data=evaluation_data,
                     eval_dir=eval_dir,
                     sketched_data_directory=sketched_data_directory,
@@ -363,30 +417,48 @@ class Benchmark:
                 )
                 with open(output_path, "w") as f:
                     json.dump(serialize_dataclass(cached), f, indent=2)
+            finalize_lightning_logger(trainer.logger)
+            cleanup_distributed()
             return cached
 
-        trainer.warmup_dataloaders()
-        if trainer.device.startswith("cuda") and torch.cuda.is_available():
+        device = str(trainer.strategy.root_device)
+        if device.startswith("cuda") and torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.synchronize()
 
-        # Benchmarking timing
-        start_time = time.perf_counter()
-        trainer.fit(resume_from_checkpoint=self.resume_from_checkpoint)
-        training_time_seconds = time.perf_counter() - start_time
-        reused_checkpoint = bool(getattr(trainer, "last_fit_reused_checkpoint", False))
+        resume_path, reused_checkpoint = prepare_resume_checkpoint(
+            module.model,
+            Path(trainer.default_root_dir),
+            enabled=self.resume_from_checkpoint,
+        )
+        training_time_seconds = None
+        peak_gpu_memory_bytes = None
+        try:
+            if device.startswith("cuda") and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            start_time = time.perf_counter()
+            trainer.fit(module, datamodule=datamodule, ckpt_path=resume_path)
+            if device.startswith("cuda") and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            training_time_seconds = time.perf_counter() - start_time
+            peak_gpu_memory_bytes = compute_peak_gpu_memory(device)
+            fit_metrics = dict(trainer.callback_metrics)
+            test_results = trainer.test(module, datamodule=datamodule) if len(datamodule.datasets["test"]) else []
+        finally:
+            finalize_lightning_logger(trainer.logger)
+            cleanup_distributed()
 
-        losses = extract_loss_metrics(trainer)
+        losses = extract_loss_metrics(fit_metrics, test_results)
         eval_metrics = self.evaluate_embeddings(
-            trainer=trainer,
+            module=module,
             evaluation_data=evaluation_data,
             eval_dir=eval_dir,
             sketched_data_directory=sketched_data_directory,
         )
 
         metrics = EvaluationResult(
-            run_name=trainer.cfg.run_name,
-            results_folder=str(trainer.results_folder),
+            run_name=module.cfg.run_name,
+            results_folder=str(trainer.default_root_dir),
             evaluation_directory=str(eval_dir),
             evaluation_json=str(output_path),
             **losses,
@@ -394,14 +466,13 @@ class Benchmark:
         )
         if not reused_checkpoint:
             metrics.training_time_seconds = training_time_seconds
-            metrics.peak_gpu_memory_bytes = compute_peak_gpu_memory(str(trainer.device))
+            metrics.peak_gpu_memory_bytes = peak_gpu_memory_bytes
             epoch_times_seconds = []
-            if trainer.lightning_trainer is not None:
-                for callback in trainer.lightning_trainer.callbacks:
-                    callback_epoch_times = getattr(callback, "epoch_times_seconds", None)
-                    if callback_epoch_times is not None:
-                        epoch_times_seconds = [float(value) for value in callback_epoch_times]
-                        break
+            for callback in trainer.callbacks:
+                callback_epoch_times = getattr(callback, "epoch_times_seconds", None)
+                if callback_epoch_times is not None:
+                    epoch_times_seconds = [float(value) for value in callback_epoch_times]
+                    break
             if epoch_times_seconds:
                 metrics.epoch_times_seconds = epoch_times_seconds
                 metrics.epoch_time_mean_seconds = sum(epoch_times_seconds) / len(epoch_times_seconds)

@@ -1,0 +1,13 @@
+type: steep.training.SteepDataModule
+
+args:
+  train_ratio: 0.8
+  val_ratio: 0.1
+  split_type: random
+  spatial_block_grid_size: 4
+  batch_size: 2
+  shuffle: true
+  random_seed: 0
+  num_workers:
+  persistent_workers:
+  pin_memory: false

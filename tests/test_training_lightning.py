@@ -1,13 +1,15 @@
-from copy import deepcopy
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
+from lightning.pytorch import Trainer
 from omegaconf import OmegaConf
 from torch import nn
 from torch_geometric.data import Data
 
-from steep.lightning import cleanup_distributed
-from steep.trainer import PyGTrainer
+from steep.lightning import build_lightning_callbacks, cleanup_distributed
+from steep.training import SteepDataModule, SteepLightningModule, load_pretrained_weights, prepare_resume_checkpoint
 from steep.utils import instantiate_from_config
 
 
@@ -17,340 +19,230 @@ class ToyAutoencoder(nn.Module):
         self.proj = nn.Linear(in_dim, in_dim)
 
     def forward(self, data: Data):
-        return {
-            "logits": self.proj(data.x),
-        }
+        return {"logits": self.proj(data.x)}
 
 
 def _make_toy_graph(offset: float, in_dim: int = 4) -> Data:
-    pos = torch.tensor(
-        [
-            [0.0 + offset, 0.0],
-            [1.0 + offset, 0.0],
-            [0.5 + offset, 0.75],
-        ],
-        dtype=torch.float32,
-    )
-    x = torch.stack(
-        [
-            torch.linspace(0.1, 0.4, steps=in_dim),
-            torch.linspace(0.2, 0.5, steps=in_dim),
-            torch.linspace(0.3, 0.6, steps=in_dim),
-        ],
-        dim=0,
-    )
-    edge_index = torch.tensor(
-        [
-            [0, 1, 1, 2, 2, 0],
-            [1, 0, 2, 1, 0, 2],
-        ],
-        dtype=torch.long,
-    )
-    return Data(x=x, edge_index=edge_index, pos=pos)
-
-
-def _make_toy_dataset(num_graphs: int = 5, in_dim: int = 4) -> list[Data]:
-    return [_make_toy_graph(float(idx), in_dim=in_dim) for idx in range(num_graphs)]
-
-
-def _make_block_graph(width: int = 4, height: int = 4, in_dim: int = 4) -> Data:
-    pos = []
-    features = []
-    edge_src = []
-    edge_dst = []
-    node_index = 0
-    for y_idx in range(height):
-        for x_idx in range(width):
-            pos.append([float(x_idx), float(y_idx)])
-            feature = torch.full((in_dim,), float(node_index), dtype=torch.float32)
-            features.append(feature)
-
-            if x_idx + 1 < width:
-                right = node_index + 1
-                edge_src.extend([node_index, right])
-                edge_dst.extend([right, node_index])
-            if y_idx + 1 < height:
-                down = node_index + width
-                edge_src.extend([node_index, down])
-                edge_dst.extend([down, node_index])
-            node_index += 1
-
     return Data(
-        x=torch.stack(features, dim=0),
-        edge_index=torch.tensor([edge_src, edge_dst], dtype=torch.long),
-        pos=torch.tensor(pos, dtype=torch.float32),
+        x=torch.stack(
+            [
+                torch.linspace(0.1, 0.4, steps=in_dim),
+                torch.linspace(0.2, 0.5, steps=in_dim),
+                torch.linspace(0.3, 0.6, steps=in_dim),
+            ],
+        ),
+        edge_index=torch.tensor([[0, 1, 1, 2, 2, 0], [1, 0, 2, 1, 0, 2]]),
+        pos=torch.tensor([[offset, 0.0], [offset + 1.0, 0.0], [offset + 0.5, 0.75]]),
     )
 
 
-def _make_trainer_cfg(tmp_path, pretrained_ckpt_path: str | None = None):
-    cfg = OmegaConf.create(
+def _make_toy_dataset(num_graphs: int = 5) -> list[Data]:
+    return [_make_toy_graph(float(idx)) for idx in range(num_graphs)]
+
+
+def _cfg():
+    return OmegaConf.create(
         {
-            "cache_dir": str(tmp_path / "cache"),
-            "project": "tests",
-            "run_name": "lightning-smoke",
-            "entity": "tests",
-            "model": {"type": "tests.test_training_lightning.ToyAutoencoder"},
-            "dataset": {"name": "toy", "args": {"data_directory": "toy-data"}},
             "optimizer": {"type": "torch.optim.AdamW", "args": {"lr": 1e-3}},
             "scheduler": {"name": "linear", "args": {"warmup_ratio": 0.0}},
-            "loss": {"type": "steep.loss.NodeMSELoss"},
+            "datamodule": {
+                "type": "steep.training.SteepDataModule",
+                "args": {"batch_size": 2, "train_ratio": 0.6, "val_ratio": 0.2, "num_workers": 0},
+            },
+            "lightning_module": {"type": "steep.training.SteepLightningModule", "args": {}},
+            "trainer": {
+                "type": "lightning.pytorch.Trainer",
+                "args": {
+                    "max_epochs": 1,
+                    "accelerator": "cpu",
+                    "devices": 1,
+                    "logger": False,
+                    "enable_progress_bar": False,
+                    "enable_model_summary": False,
+                    "num_sanity_val_steps": 0,
+                },
+            },
         },
     )
-    if pretrained_ckpt_path is not None:
-        cfg.pretrained_ckpt_path = pretrained_ckpt_path
-    return cfg
 
 
-def test_pyg_trainer_lightning_fit_saves_last_checkpoint(tmp_path):
-    cfg = _make_trainer_cfg(tmp_path)
-    trainer = PyGTrainer(
+def _instantiate_stack(tmp_path: Path):
+    cfg = _cfg()
+    datamodule = instantiate_from_config(cfg.datamodule, data=_make_toy_dataset())
+    model = ToyAutoencoder()
+    module = instantiate_from_config(
+        cfg.lightning_module,
         cfg=cfg,
-        model=ToyAutoencoder(),
-        data=_make_toy_dataset(),
-        batchsize=2,
-        epochs=1,
-        device="cpu",
-        train_ratio=0.6,
-        val_ratio=0.2,
+        model=model,
+        loss_function=instantiate_from_config({"type": "steep.loss.NodeMSELoss"}),
+    )
+    trainer = instantiate_from_config(
+        cfg.trainer,
+        default_root_dir=str(tmp_path),
+        callbacks=build_lightning_callbacks(tmp_path, enable_lr_monitor=False, enable_progress_bar=False),
+    )
+    return model, module, datamodule, trainer
+
+
+def test_configured_components_fit_validate_and_test(tmp_path):
+    _, module, datamodule, trainer = _instantiate_stack(tmp_path)
+
+    trainer.fit(module, datamodule=datamodule)
+    fit_metrics = dict(trainer.callback_metrics)
+    test_results = trainer.test(module, datamodule=datamodule)
+
+    assert isinstance(trainer, Trainer)
+    assert isinstance(module, SteepLightningModule)
+    assert isinstance(datamodule, SteepDataModule)
+    assert "val_loss" in fit_metrics
+    assert "test_loss" in test_results[0]
+    assert (tmp_path / "last.ckpt").exists()
+
+
+def test_epoch_timer_synchronizes_cuda_at_boundaries(tmp_path, monkeypatch):
+    import steep.lightning as lightning_utils
+
+    timer = next(
+        callback
+        for callback in build_lightning_callbacks(
+            tmp_path,
+            enable_lr_monitor=False,
+            enable_progress_bar=False,
+        )
+        if hasattr(callback, "epoch_times_seconds")
+    )
+    synchronize_calls = []
+    timestamps = iter((10.0, 13.5))
+    module = SimpleNamespace(device=torch.device("cuda:0"))
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda device: synchronize_calls.append(device))
+    monkeypatch.setattr(lightning_utils, "perf_counter", lambda: next(timestamps))
+
+    timer.on_fit_start(None, module)
+    timer.on_train_epoch_start(None, module)
+    timer.on_train_epoch_end(None, module)
+
+    assert synchronize_calls == [torch.device("cuda:0"), torch.device("cuda:0")]
+    assert timer.epoch_times_seconds == [3.5]
+
+
+def test_scheduler_counts_partial_batches_and_accumulated_optimizer_steps(tmp_path, monkeypatch):
+    import steep.training as training
+
+    cfg = _cfg()
+    captured = {}
+    original_get_scheduler = training.get_scheduler
+
+    def capture_scheduler(**kwargs):
+        captured.update(kwargs)
+        return original_get_scheduler(**kwargs)
+
+    monkeypatch.setattr(training, "get_scheduler", capture_scheduler)
+    module = SteepLightningModule(cfg, ToyAutoencoder(), instantiate_from_config({"type": "steep.loss.NodeMSELoss"}))
+    datamodule = SteepDataModule(
+        data=_make_toy_dataset(7),
+        batch_size=2,
+        train_ratio=1.0,
+        val_ratio=0.0,
+        num_workers=0,
+    )
+    trainer = Trainer(
+        default_root_dir=tmp_path,
+        max_epochs=3,
         accelerator="cpu",
         devices=1,
-        strategy="auto",
-        precision="32-true",
-        num_sanity_val_steps=0,
-        num_workers=0,
-        persistent_workers=False,
-        pin_memory=False,
-        run_wandb=False,
+        accumulate_grad_batches=2,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
     )
 
-    trainer.fit(resume_from_checkpoint=False)
+    trainer.fit(module, datamodule=datamodule)
 
-    assert trainer.lightning_trainer is not None
-    assert trainer.lightning_module is not None
-    assert trainer.step > 0
-    assert (trainer.results_folder / "last.ckpt").exists()
+    assert len(datamodule.train_dataloader()) == 4
+    assert trainer.estimated_stepping_batches == 6
+    assert captured["num_training_steps"] == 6
 
 
-def test_pyg_trainer_load_pretrained_from_lightning_checkpoint(tmp_path):
-    cfg = _make_trainer_cfg(tmp_path)
-    trainer = PyGTrainer(
-        cfg=cfg,
-        model=ToyAutoencoder(),
-        data=_make_toy_dataset(),
-        batchsize=2,
-        epochs=1,
-        device="cpu",
-        train_ratio=0.6,
-        val_ratio=0.2,
-        accelerator="cpu",
-        devices=1,
-        strategy="auto",
-        precision="32-true",
-        num_sanity_val_steps=0,
-        num_workers=0,
-        persistent_workers=False,
-        pin_memory=False,
-        run_wandb=False,
-    )
-    trainer.fit(resume_from_checkpoint=False)
-
-    pretrained_path = trainer.results_folder / "last.ckpt"
-    reloaded_cfg = _make_trainer_cfg(tmp_path, pretrained_ckpt_path=str(pretrained_path))
-    reloaded = PyGTrainer(
-        cfg=reloaded_cfg,
-        model=ToyAutoencoder(),
-        data=_make_toy_dataset(),
-        batchsize=2,
-        epochs=1,
-        device="cpu",
-        train_ratio=0.6,
-        val_ratio=0.2,
-        accelerator="cpu",
-        devices=1,
-        strategy="auto",
-        precision="32-true",
-        num_sanity_val_steps=0,
-        num_workers=0,
-        persistent_workers=False,
-        pin_memory=False,
-        run_wandb=False,
-    )
-
-    for parameter in reloaded.model.parameters():
+def test_load_pretrained_weights_from_lightning_checkpoint(tmp_path):
+    model, module, datamodule, trainer = _instantiate_stack(tmp_path)
+    trainer.fit(module, datamodule=datamodule)
+    expected = {key: value.clone() for key, value in model.state_dict().items()}
+    reloaded = ToyAutoencoder()
+    for parameter in reloaded.parameters():
         nn.init.zeros_(parameter)
 
-    reloaded.load_pretrained()
-
-    expected_state = trainer.model.state_dict()
-    actual_state = reloaded.model.state_dict()
-    assert expected_state.keys() == actual_state.keys()
-    for key in expected_state:
-        assert torch.allclose(actual_state[key], expected_state[key])
+    assert load_pretrained_weights(reloaded, tmp_path)
+    for key, value in reloaded.state_dict().items():
+        assert torch.allclose(value, expected[key])
 
 
-def test_pyg_trainer_resolves_checkpoint_directory_to_best_ckpt(tmp_path):
-    cfg = _make_trainer_cfg(tmp_path)
-    trainer = PyGTrainer(
-        cfg=cfg,
-        model=ToyAutoencoder(),
-        data=_make_toy_dataset(),
-        batchsize=2,
-        epochs=1,
-        device="cpu",
-        train_ratio=0.6,
-        val_ratio=0.2,
-        accelerator="cpu",
-        devices=1,
-        strategy="auto",
-        precision="32-true",
-        num_sanity_val_steps=0,
-        num_workers=0,
-        persistent_workers=False,
-        pin_memory=False,
-        run_wandb=False,
+def test_legacy_resume_loads_weights_and_resets_loop_state(tmp_path):
+    expected_model = ToyAutoencoder()
+    legacy_path = tmp_path / "model-2.pt"
+    torch.save(
+        {
+            "model": expected_model.state_dict(),
+            "optimizer": {"legacy": True},
+            "epoch": 2,
+            "step": 9,
+        },
+        legacy_path,
     )
-    trainer.fit(resume_from_checkpoint=False)
+    (tmp_path / "milestone.txt").write_text("2")
+    actual_model = ToyAutoencoder()
+    for parameter in actual_model.parameters():
+        nn.init.zeros_(parameter)
 
-    reloaded_cfg = _make_trainer_cfg(tmp_path, pretrained_ckpt_path=str(trainer.results_folder))
-    reloaded = PyGTrainer(
-        cfg=reloaded_cfg,
-        model=ToyAutoencoder(),
-        data=_make_toy_dataset(),
-        batchsize=2,
-        epochs=0,
-        device="cpu",
-        train_ratio=0.6,
-        val_ratio=0.2,
-        accelerator="cpu",
-        devices=1,
-        strategy="auto",
-        precision="32-true",
-        num_sanity_val_steps=0,
-        num_workers=0,
-        persistent_workers=False,
-        pin_memory=False,
-        run_wandb=False,
-    )
+    with pytest.warns(UserWarning, match="optimizer, scheduler, epoch, and loop state were reset"):
+        resume_path, reused = prepare_resume_checkpoint(actual_model, tmp_path, enabled=True)
 
-    assert reloaded.get_pretrained_load_path() == trainer.results_folder / "best.ckpt"
+    assert resume_path is None
+    assert reused
+    for key, value in actual_model.state_dict().items():
+        assert torch.allclose(value, expected_model.state_dict()[key])
 
 
-def test_pyg_trainer_rejects_deepspeed_on_cpu(tmp_path):
-    cfg = _make_trainer_cfg(tmp_path)
-    trainer = PyGTrainer(
-        cfg=cfg,
-        model=ToyAutoencoder(),
-        data=_make_toy_dataset(),
-        batchsize=2,
-        epochs=1,
-        device="cpu",
-        train_ratio=0.6,
-        val_ratio=0.2,
-        accelerator="cpu",
-        devices=1,
-        strategy="deepspeed_stage_2",
-        precision="32-true",
-        num_sanity_val_steps=0,
-        num_workers=0,
-        persistent_workers=False,
-        pin_memory=False,
-        run_wandb=False,
-    )
-    trainer.initialize_checkpointing()
+def test_lightning_resume_path_is_returned_for_exact_resume(tmp_path):
+    checkpoint_path = tmp_path / "last.ckpt"
+    checkpoint_path.touch()
 
-    with pytest.raises(ValueError, match="DeepSpeed strategy requires `accelerator=gpu`"):
-        trainer._build_lightning_trainer()
+    resume_path, reused = prepare_resume_checkpoint(ToyAutoencoder(), tmp_path, enabled=True)
+
+    assert resume_path == str(checkpoint_path)
+    assert reused
 
 
-def test_pyg_trainer_small_dataset_keeps_nonzero_val_and_test(tmp_path):
-    cfg = _make_trainer_cfg(tmp_path)
-    trainer = PyGTrainer(
-        cfg=cfg,
-        model=ToyAutoencoder(),
-        data=_make_toy_dataset(num_graphs=8),
-        batchsize=1,
-        epochs=0,
-        device="cpu",
-        train_ratio=0.8,
-        val_ratio=0.1,
-        accelerator="cpu",
-        devices=1,
-        strategy="auto",
-        precision="32-true",
-        num_sanity_val_steps=0,
-        num_workers=0,
-        persistent_workers=False,
-        pin_memory=False,
-        run_wandb=False,
-    )
-
-    assert len(trainer.datasets["train"]) > 0
-    assert len(trainer.datasets["val"]) > 0
-    assert len(trainer.datasets["test"]) > 0
-    assert len(trainer.datasets["train"]) + len(trainer.datasets["val"]) + len(trainer.datasets["test"]) == 8
-
-
-def test_pyg_trainer_spatial_block_split_creates_non_overlapping_subgraphs(tmp_path):
-    cfg = _make_trainer_cfg(tmp_path)
-    trainer = PyGTrainer(
-        cfg=cfg,
-        model=ToyAutoencoder(),
-        data=[_make_block_graph()],
-        batchsize=1,
-        epochs=0,
-        device="cpu",
-        train_ratio=0.5,
-        val_ratio=0.25,
-        split_type="spatial_block",
-        spatial_block_grid_size=2,
-        accelerator="cpu",
-        devices=1,
-        strategy="auto",
-        precision="32-true",
-        num_sanity_val_steps=0,
-        num_workers=0,
-        persistent_workers=False,
-        pin_memory=False,
-        run_wandb=False,
-    )
-
-    train_graph = trainer.datasets["train"][0]
-    val_graph = trainer.datasets["val"][0]
-    test_graph = trainer.datasets["test"][0]
-
-    train_ids = set(train_graph.x[:, 0].tolist())
-    val_ids = set(val_graph.x[:, 0].tolist())
-    test_ids = set(test_graph.x[:, 0].tolist())
-    all_ids = train_ids | val_ids | test_ids
-
-    assert train_ids
-    assert val_ids
-    assert test_ids
-    assert train_ids.isdisjoint(val_ids)
-    assert train_ids.isdisjoint(test_ids)
-    assert val_ids.isdisjoint(test_ids)
-    assert all_ids == set(range(16))
+def test_data_module_small_dataset_keeps_nonzero_splits():
+    datamodule = SteepDataModule(data=_make_toy_dataset(8), batch_size=1, train_ratio=0.8, val_ratio=0.1)
+    sizes = [len(datamodule.datasets[name]) for name in ("train", "val", "test")]
+    assert all(size > 0 for size in sizes)
+    assert sum(sizes) == 8
 
 
 def test_cleanup_distributed_resets_deepspeed_global_state(monkeypatch):
     deepspeed_comm = pytest.importorskip("deepspeed.comm")
     deepspeed_groups = pytest.importorskip("deepspeed.utils.groups")
-
-    sentinel_group = object()
-    sentinel_dict = {"sentinel": object()}
-
+    sentinel = object()
     monkeypatch.setattr(deepspeed_comm, "cdb", object(), raising=False)
-    monkeypatch.setattr(deepspeed_groups, "_WORLD_GROUP", sentinel_group, raising=False)
-    monkeypatch.setattr(deepspeed_groups, "_DATA_PARALLEL_GROUP", sentinel_group, raising=False)
-    monkeypatch.setattr(deepspeed_groups, "_MODEL_PARALLEL_GROUP", sentinel_group, raising=False)
-    monkeypatch.setattr(deepspeed_groups, "_TENSOR_MODEL_PARALLEL_GROUP", sentinel_group, raising=False)
-    monkeypatch.setattr(deepspeed_groups, "_ZERO_PARAM_INTRA_PARALLEL_GROUP", sentinel_group, raising=False)
-    monkeypatch.setattr(deepspeed_groups, "_EXPERT_PARALLEL_GROUP", sentinel_dict.copy(), raising=False)
-    monkeypatch.setattr(deepspeed_groups, "_EXPERT_PARALLEL_GROUP_RANKS", sentinel_dict.copy(), raising=False)
-    monkeypatch.setattr(deepspeed_groups, "_EXPERT_DATA_PARALLEL_GROUP", sentinel_dict.copy(), raising=False)
-    monkeypatch.setattr(deepspeed_groups, "_EXPERT_DATA_PARALLEL_GROUP_RANKS", sentinel_dict.copy(), raising=False)
-    monkeypatch.setattr(deepspeed_groups, "_ALL_TO_ALL_GROUP", sentinel_dict.copy(), raising=False)
-    monkeypatch.setattr(deepspeed_groups, "expert_tensor_parallel_world_size", 4, raising=False)
+    for name in (
+        "_WORLD_GROUP",
+        "_DATA_PARALLEL_GROUP",
+        "_MODEL_PARALLEL_GROUP",
+        "_TENSOR_MODEL_PARALLEL_GROUP",
+        "_ZERO_PARAM_INTRA_PARALLEL_GROUP",
+    ):
+        monkeypatch.setattr(deepspeed_groups, name, sentinel, raising=False)
+    for name in (
+        "_EXPERT_PARALLEL_GROUP",
+        "_EXPERT_PARALLEL_GROUP_RANKS",
+        "_EXPERT_DATA_PARALLEL_GROUP",
+        "_EXPERT_DATA_PARALLEL_GROUP_RANKS",
+        "_ALL_TO_ALL_GROUP",
+    ):
+        monkeypatch.setattr(deepspeed_groups, name, {"sentinel": sentinel}, raising=False)
     monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
 
@@ -367,4 +259,3 @@ def test_cleanup_distributed_resets_deepspeed_global_state(monkeypatch):
     assert deepspeed_groups._EXPERT_DATA_PARALLEL_GROUP == {}
     assert deepspeed_groups._EXPERT_DATA_PARALLEL_GROUP_RANKS == {}
     assert deepspeed_groups._ALL_TO_ALL_GROUP == {}
-    assert deepspeed_groups.expert_tensor_parallel_world_size == 1

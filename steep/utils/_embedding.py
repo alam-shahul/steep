@@ -17,17 +17,18 @@ class SlideEmbeddingRecord:
 
 
 def extract_slide_embedding_records(
-    trainer,
-    evaluation_data=None,
+    model,
+    evaluation_data,
+    device: str | torch.device,
     label_keys: list[str] | tuple[str, ...] = (),
     progress_desc: str = "Extracting Embeddings",
 ) -> list[SlideEmbeddingRecord]:
     """Extract per-slide embedding records from a trained model.
 
     Args:
-        trainer: Trainer object that owns the trained model and target device.
+        model: Trained model used to produce embeddings.
         evaluation_data: Dataset to iterate over for graph construction and inference.
-            Defaults to ``trainer.data`` when omitted.
+        device: Device on which inference is performed.
         label_keys: Observation-column names to copy from each slide's ``adata.obs``
             into the returned record when present.
         progress_desc: Description shown in the tqdm progress bar during embedding
@@ -38,14 +39,10 @@ def extract_slide_embedding_records(
         processed slide.
 
     """
-    if evaluation_data is None:
-        evaluation_data = trainer.data
-
     if not hasattr(evaluation_data, "data_paths"):
         return []
 
-    model = trainer.lightning_module.model if trainer.lightning_module is not None else trainer.model
-    model = model.to(trainer.device)
+    model = model.to(device)
     slide_records = []
 
     model.eval()
@@ -54,7 +51,7 @@ def extract_slide_embedding_records(
         total = len(evaluation_data.data_paths)
         for idx, data_path in tqdm(iterator, total=total, desc=progress_desc, unit="slide"):
             adata = ad.read_h5ad(data_path)
-            graph = evaluation_data[idx].to(trainer.device)
+            graph = evaluation_data[idx].to(device)
             outputs = model(graph)
             if "embedding" not in outputs:
                 continue

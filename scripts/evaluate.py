@@ -14,14 +14,44 @@ import json
 
 import hydra
 
-from steep.trainer import setup_trainer
+from steep.lightning import build_lightning_callbacks, build_wandb_logger
+from steep.training import infer_num_genes, initialize_checkpointing, load_pretrained_weights
 from steep.utils import instantiate_from_config
 
 
 @hydra.main(config_path="../steep/config", config_name="config", version_base="1.3")
 def main(config):
-    trainer = setup_trainer(config)
-    benchmark = instantiate_from_config(config.benchmark, cfg=config, trainer=trainer)
+    data = instantiate_from_config(config.dataset)
+    datamodule = instantiate_from_config(config.datamodule, data=data)
+    model = instantiate_from_config(config.model, in_dim=infer_num_genes(config))
+    loss_function = instantiate_from_config(config.loss)
+    module = instantiate_from_config(
+        config.lightning_module,
+        cfg=config,
+        model=model,
+        loss_function=loss_function,
+    )
+    results_folder = initialize_checkpointing(config)
+    logger = build_wandb_logger(config, bool(config.run_wandb))
+    callbacks = build_lightning_callbacks(
+        results_folder,
+        enable_lr_monitor=bool(logger),
+        enable_progress_bar=bool(config.trainer.args.enable_progress_bar),
+    )
+    trainer = instantiate_from_config(
+        config.trainer,
+        default_root_dir=str(results_folder),
+        callbacks=callbacks,
+        logger=logger or False,
+    )
+    load_pretrained_weights(model, config.get("pretrained_ckpt_path"), device="cpu")
+    benchmark = instantiate_from_config(
+        config.benchmark,
+        cfg=config,
+        module=module,
+        datamodule=datamodule,
+        trainer=trainer,
+    )
     summary = benchmark.run()
     print(json.dumps(summary, indent=2, default=str))
     baseline_json = summary.get("baseline", {}).get("evaluation_json")

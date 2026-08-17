@@ -1,7 +1,5 @@
-import logging
 import os
 import random
-from distutils import log as distutils_log
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -148,16 +146,6 @@ def cleanup_distributed() -> None:
         deepspeed_groups.expert_tensor_parallel_world_size = 1
 
 
-def suppress_deepspeed_probe_logging() -> None:
-    """Suppress noisy compiler probe logs emitted by DeepSpeed op builders."""
-    distutils_log.set_threshold(distutils_log.WARN)
-    distutils_log.set_verbosity = lambda *args, **kwargs: None  # type: ignore[assignment]
-
-    root_logger = logging.getLogger()
-    if root_logger.level in (logging.NOTSET, logging.DEBUG, logging.INFO):
-        root_logger.setLevel(logging.WARNING)
-
-
 class _DynamicWidthTQDMProgressBar(TQDMProgressBar):
     """Progress bar that expands to the terminal width when possible."""
 
@@ -195,20 +183,27 @@ class _EpochTimerCallback(Callback):
         self._epoch_start_time = None
 
     def on_train_epoch_start(self, trainer, pl_module) -> None:
-        del trainer, pl_module
+        del trainer
+        if pl_module.device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize(pl_module.device)
         self._epoch_start_time = perf_counter()
 
     def on_train_epoch_end(self, trainer, pl_module) -> None:
-        del trainer, pl_module
+        del trainer
         if self._epoch_start_time is None:
             return
+        if pl_module.device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize(pl_module.device)
         self.epoch_times_seconds.append(perf_counter() - self._epoch_start_time)
         self._epoch_start_time = None
 
 
-def build_lightning_callbacks(results_folder: Path, enable_lr_monitor: bool = True) -> list:
+def build_lightning_callbacks(
+    results_folder: Path,
+    enable_lr_monitor: bool = True,
+    enable_progress_bar: bool = True,
+) -> list:
     callbacks = [
-        _DynamicWidthTQDMProgressBar(),
         _EpochTimerCallback(),
         ModelCheckpoint(
             dirpath=str(results_folder),
@@ -227,6 +222,8 @@ def build_lightning_callbacks(results_folder: Path, enable_lr_monitor: bool = Tr
             save_top_k=1,
         ),
     ]
+    if enable_progress_bar:
+        callbacks.insert(0, _DynamicWidthTQDMProgressBar())
     if enable_lr_monitor:
         callbacks.append(LearningRateMonitor(logging_interval="step"))
     return callbacks
@@ -324,9 +321,3 @@ def extract_submodule_state_dict(
             return extracted_state
 
     return checkpoint
-
-
-def extract_epoch_and_step(checkpoint: dict[str, Any]) -> tuple[int, int]:
-    epoch = int(checkpoint.get("epoch", 0))
-    step = int(checkpoint.get("step", checkpoint.get("global_step", 0)))
-    return epoch, step

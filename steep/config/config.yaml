@@ -6,6 +6,8 @@ defaults:
   - /dataset: brain_pretrain
   - /optimizer: adamw
   - /scheduler: cosine
+  - /datamodule: default
+  - /lightning_module: default
   - /trainer: default
   - /benchmark: default
   - /loss: mse
@@ -13,3 +15,4 @@ defaults:
 run_name: run_name
 project: default
 float_dtype: float32
+run_wandb: false

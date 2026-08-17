@@ -42,8 +42,7 @@ uv run python scripts/evaluate.py \
   +sketcher="$name" \
   sketcher.args.mog_args.retention_ratio="$ratio" \
   sketcher.args.random_seed="$seed" \
-  trainer.args.epochs=100 \
-  trainer.args.device=cuda \
+  trainer.args.max_epochs=100 \
   trainer.args.accelerator=gpu
 
 echo

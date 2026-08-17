@@ -24,13 +24,12 @@ python scripts/evaluate.py \
   benchmark=zhuang \
   +sketcher=random_subsample \
   sketcher.args.retention_ratio=0.1 \
-  trainer.args.device=cuda \
   trainer.args.accelerator=gpu \
-  trainer.args.epochs=100 \
-  trainer.args.batchsize=1 \
+  trainer.args.max_epochs=100 \
+  datamodule.args.batch_size=1 \
   benchmark.args.num_workers=5 \
   benchmark.args.run_wandb=true \
-  trainer.args.run_wandb=true
+  run_wandb=true
 ```
 
 This script:

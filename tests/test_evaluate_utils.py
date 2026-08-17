@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 
 import anndata as ad
 import numpy as np
@@ -62,14 +61,12 @@ def test_extract_slide_embedding_records_returns_expected_fields(tmp_path: Path)
             del graph
             return {"embedding": torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float32)}
 
-    trainer = SimpleNamespace(
-        data=DummyDataset(data_path),
+    records = extract_slide_embedding_records(
         model=DummyModel(),
-        lightning_module=None,
+        evaluation_data=DummyDataset(data_path),
         device="cpu",
+        label_keys=["cell_type"],
     )
-
-    records = extract_slide_embedding_records(trainer, label_keys=["cell_type"])
 
     assert len(records) == 1
     record = records[0]

@@ -127,25 +127,6 @@ def _group_metric_by_method_and_ratio(
     return grouped_scores
 
 
-def _group_total_epoch_time_by_method_and_ratio(rows: list[dict[str, Any]]) -> dict[str, dict[float, list[float]]]:
-    grouped_scores: dict[str, dict[float, list[float]]] = defaultdict(lambda: defaultdict(list))
-
-    for row in rows:
-        method = row.get("sketcher.type")
-        retention_ratio = row.get("sketcher.args.retention_ratio")
-        epoch_times = row.get("evaluation.epoch_times_seconds")
-        if not method or retention_ratio in (None, "") or epoch_times in (None, ""):
-            continue
-
-        if isinstance(epoch_times, str):
-            epoch_times = json.loads(epoch_times)
-
-        total_epoch_time = float(sum(float(value) for value in epoch_times))
-        grouped_scores[method][float(retention_ratio)].append(total_epoch_time)
-
-    return grouped_scores
-
-
 def _plot_metric_panel(ax, grouped_scores: dict[str, dict[float, list[float]]], ylabel: str, title: str) -> None:
     for method, scores_by_ratio in sorted(grouped_scores.items()):
         ratios = sorted(scores_by_ratio)
@@ -177,7 +158,10 @@ def write_plot(rows: list[dict[str, Any]], output_path: Path, label_key: str) ->
             "evaluation.peak_gpu_memory_bytes",
         ).items()
     }
-    epoch_runtime_scores = _group_total_epoch_time_by_method_and_ratio(rows)
+    epoch_runtime_scores = _group_metric_by_method_and_ratio(
+        rows,
+        "evaluation.epoch_time_mean_excluding_first_seconds",
+    )
 
     if not nmi_scores:
         raise ValueError(
@@ -201,8 +185,8 @@ def write_plot(rows: list[dict[str, Any]], output_path: Path, label_key: str) ->
     _plot_metric_panel(
         axes[2],
         epoch_runtime_scores,
-        ylabel="Total Epoch Runtime (s)",
-        title="Retention Ratio vs Total Epoch Runtime",
+        ylabel="Steady-State Epoch Runtime (s)",
+        title="Retention Ratio vs Steady-State Runtime",
     )
     axes[0].legend()
     fig.subplots_adjust(wspace=0.25)

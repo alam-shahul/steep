@@ -5,7 +5,7 @@ from omegaconf import OmegaConf
 from torch import nn
 from torch_geometric.data import Data
 
-from steep.trainer import PyGTrainer
+from steep.training import SteepDataModule, SteepLightningModule
 
 
 class _DummyGraphModel(nn.Module):
@@ -18,91 +18,81 @@ class _DummyGraphModel(nn.Module):
         return {"logits": logits, "embedding": logits}
 
 
-def _cfg():
-    return OmegaConf.create(
-        {
-            "optimizer": {
-                "type": "torch.optim.AdamW",
-                "args": {"lr": 1e-3, "weight_decay": 0.0},
-            },
-            "scheduler": {
-                "name": "constant",
-                "args": {"warmup_ratio": 0.0},
-            },
-            "loss": {
-                "type": "steep.loss.NodeMSELoss",
-            },
-        },
-    )
-
-
-def test_pyg_trainer_allows_test_only_random_split():
-    dataset = [
+def _graphs(count: int):
+    return [
         Data(
             x=torch.randn(4, 3),
             edge_index=torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long),
             pos=torch.randn(4, 2),
         )
-        for _ in range(3)
+        for _ in range(count)
     ]
 
-    trainer = PyGTrainer(
-        cfg=_cfg(),
-        model=_DummyGraphModel(),
-        data=dataset,
-        batchsize=1,
-        epochs=1,
-        device="cpu",
-        shuffle=True,
+
+def test_data_module_allows_test_only_random_split():
+    datamodule = SteepDataModule(
+        data=_graphs(3),
+        batch_size=1,
         train_ratio=0.0,
         val_ratio=0.0,
-        split_type="random",
-        num_workers=0,
-        persistent_workers=False,
-        pin_memory=False,
     )
 
-    assert len(trainer.datasets["train"]) == 0
-    assert len(trainer.datasets["val"]) == 0
-    assert len(trainer.datasets["test"]) == len(dataset)
-    assert len(trainer.dataloaders["train"]) == 0
-    assert len(trainer.dataloaders["val"]) == 0
-    assert len(trainer.dataloaders["test"]) == len(dataset)
+    assert len(datamodule.datasets["train"]) == 0
+    assert len(datamodule.datasets["val"]) == 0
+    assert len(datamodule.datasets["test"]) == 3
+    assert len(datamodule.train_dataloader()) == 0
+    assert len(datamodule.val_dataloader()) == 0
+    assert len(datamodule.test_dataloader()) == 3
 
 
-def test_scheduler_steps_include_partial_batches_and_gradient_accumulation(monkeypatch):
-    dataset = [
-        Data(
-            x=torch.randn(4, 3),
-            edge_index=torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long),
-            pos=torch.randn(4, 2),
-        )
-        for _ in range(5)
-    ]
+def test_scheduler_uses_lightning_estimated_optimizer_steps(monkeypatch):
+    cfg = OmegaConf.create(
+        {
+            "optimizer": {"type": "torch.optim.AdamW", "args": {"lr": 1e-3}},
+            "scheduler": {"name": "constant", "args": {"warmup_ratio": 0.25}},
+        },
+    )
+    module = SteepLightningModule(cfg, _DummyGraphModel(), Mock())
+    module._trainer = Mock(estimated_stepping_batches=8)
     scheduler = Mock()
     get_scheduler = Mock(return_value=scheduler)
-    monkeypatch.setattr("steep.trainer.get_scheduler", get_scheduler)
+    monkeypatch.setattr("steep.training.get_scheduler", get_scheduler)
 
-    trainer = PyGTrainer(
-        cfg=_cfg(),
-        model=_DummyGraphModel(),
-        data=dataset,
-        batchsize=2,
-        epochs=3,
-        device="cpu",
-        train_ratio=1.0,
-        val_ratio=0.0,
-        accumulate_grad_batches=2,
-        num_workers=0,
-        persistent_workers=False,
-        pin_memory=False,
-    )
+    configured = module.configure_optimizers()
 
-    assert len(trainer.dataloaders["train"]) == 3
-    assert trainer.lr_scheduler is scheduler
+    assert configured["lr_scheduler"]["scheduler"] is scheduler
     get_scheduler.assert_called_once_with(
         name="constant",
-        optimizer=trainer.optimizer,
-        num_warmup_steps=0,
-        num_training_steps=6,
+        optimizer=configured["optimizer"],
+        num_warmup_steps=2,
+        num_training_steps=8,
     )
+
+
+def test_spatial_block_split_creates_non_overlapping_subgraphs():
+    width = 4
+    positions = torch.tensor([[float(x), float(y)] for y in range(width) for x in range(width)])
+    features = torch.arange(width * width, dtype=torch.float32).unsqueeze(1)
+    edges = []
+    for node in range(width * width):
+        x, y = node % width, node // width
+        if x + 1 < width:
+            edges.extend(((node, node + 1), (node + 1, node)))
+        if y + 1 < width:
+            edges.extend(((node, node + width), (node + width, node)))
+    graph = Data(x=features, pos=positions, edge_index=torch.tensor(edges).T.contiguous())
+    datamodule = SteepDataModule(
+        data=[graph],
+        batch_size=1,
+        train_ratio=0.5,
+        val_ratio=0.25,
+        split_type="spatial_block",
+        spatial_block_grid_size=2,
+    )
+
+    node_ids = [set(datamodule.datasets[name][0].x[:, 0].tolist()) for name in ("train", "val", "test")]
+    assert all(node_ids)
+    assert node_ids[0].isdisjoint(node_ids[1])
+    assert node_ids[0].isdisjoint(node_ids[2])
+    assert node_ids[1].isdisjoint(node_ids[2])
+    assert set.union(*node_ids) == set(range(width * width))

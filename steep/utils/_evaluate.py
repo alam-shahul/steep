@@ -60,9 +60,11 @@ def compute_peak_gpu_memory(device: str) -> int | None:
     return int(torch.cuda.max_memory_allocated())
 
 
-def extract_loss_metrics(trainer) -> dict[str, float | None]:
+def extract_loss_metrics(callback_metrics, test_results=()) -> dict[str, float | None]:
     """Collect final train, validation, and test losses from Lightning."""
-    callback_metrics = trainer.lightning_trainer.callback_metrics if trainer.lightning_trainer is not None else {}
+    metrics = dict(callback_metrics)
+    for result in test_results:
+        metrics.update(result)
     metric_names = {
         "train_loss": ("train_loss_epoch", "train_loss"),
         "val_loss": ("val_loss",),
@@ -73,8 +75,8 @@ def extract_loss_metrics(trainer) -> dict[str, float | None]:
     for output_name, candidates in metric_names.items():
         value = None
         for candidate in candidates:
-            if candidate in callback_metrics:
-                value = to_builtin(callback_metrics[candidate])
+            if candidate in metrics:
+                value = to_builtin(metrics[candidate])
                 break
         extracted[output_name] = value
 
@@ -142,9 +144,11 @@ def iter_evaluation_results(
 
 
 def evaluate_sketch_cluster_agreement(
-    reference_trainer,
+    reference_model,
+    reference_device,
     reference_data,
-    target_trainer,
+    target_model,
+    target_device,
     target_data,
     embedding_eval_num_workers: int,
     random_seed: int,
@@ -155,13 +159,15 @@ def evaluate_sketch_cluster_agreement(
     """Compare sketch-model clusters against clusters from the full-data
     model."""
     reference_records = extract_slide_embedding_records(
-        trainer=reference_trainer,
+        model=reference_model,
         evaluation_data=reference_data,
+        device=reference_device,
         progress_desc="Extracting reference embeddings",
     )
     target_records = extract_slide_embedding_records(
-        trainer=target_trainer,
+        model=target_model,
         evaluation_data=target_data,
+        device=target_device,
         progress_desc="Extracting sketch embeddings",
     )
     if not reference_records or not target_records:
