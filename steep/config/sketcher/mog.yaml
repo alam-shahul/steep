@@ -1,4 +1,4 @@
-type: steep.sketcher.MoGSketcher
+type: steep.sketch.MoGSketcher
 
 args:
   train_ratio: 0.8

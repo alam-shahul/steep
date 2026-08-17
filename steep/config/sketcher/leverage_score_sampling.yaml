@@ -1,4 +1,4 @@
-type: steep.sketcher.LeverageScoreSketcher
+type: steep.sketch.LeverageScoreSketcher
 
 args:
   retention_ratio: 0.1

@@ -1,9 +1,11 @@
+import importlib
 from pathlib import Path
 
 import anndata as ad
 import numpy as np
+from omegaconf import OmegaConf
 
-from steep.sketcher import HopperSketcher, RandomSubsampleSketcher
+from steep.sketch import HopperSketcher, RandomSubsampleSketcher
 
 
 def _make_adata(num_cells: int = 10, num_genes: int = 4) -> ad.AnnData:
@@ -18,6 +20,16 @@ def _make_adata(num_cells: int = 10, num_genes: int = 4) -> ad.AnnData:
         adjacency[idx + 1, idx] = 1.0
     adata.obsp["adjacency_matrix"] = adjacency
     return adata
+
+
+def test_sketcher_config_targets_resolve_from_public_api():
+    config_dir = Path(__file__).parents[1] / "steep" / "config" / "sketcher"
+
+    for config_path in config_dir.glob("*.yaml"):
+        target = OmegaConf.load(config_path).type
+        module_name, class_name = target.rsplit(".", 1)
+        assert module_name == "steep.sketch"
+        assert getattr(importlib.import_module(module_name), class_name) is not None
 
 
 def test_random_subsample_sketcher_fit_transform_reduces_cells():

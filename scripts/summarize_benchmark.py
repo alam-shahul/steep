@@ -30,23 +30,23 @@ LOG_NAME_RE = re.compile(
 
 
 EDGE_METHOD_NAME_TO_TYPE = {
-    "mog": "steep.sketcher.MoGSketcher",
-    "edge_random": "steep.sketcher.RandomEdgeSketcher",
-    "edge_spatialshort": "steep.sketcher.SpatialShortEdgeSketcher",
-    "edge_spatiallong": "steep.sketcher.SpatialLongEdgeSketcher",
-    "edge_exprsim": "steep.sketcher.ExpressionSimilarityEdgeSketcher",
-    "edge_hybrid": "steep.sketcher.HybridSpatialExpressionEdgeSketcher",
+    "mog": "steep.sketch.MoGSketcher",
+    "edge_random": "steep.sketch.RandomEdgeSketcher",
+    "edge_spatialshort": "steep.sketch.SpatialShortEdgeSketcher",
+    "edge_spatiallong": "steep.sketch.SpatialLongEdgeSketcher",
+    "edge_exprsim": "steep.sketch.ExpressionSimilarityEdgeSketcher",
+    "edge_hybrid": "steep.sketch.HybridSpatialExpressionEdgeSketcher",
 }
 
 
 NODE_METHOD_NAME_TO_TYPE = {
-    "mog_node": "steep.sketcher.MoGSketcher",
-    "geosketch": "steep.sketcher.GeoSketcher",
-    "hopper": "steep.sketcher.HopperSketcher",
-    "jointhopper": "steep.sketcher.JointHopperSketcher",
-    "leverage_score_sampling": "steep.sketcher.LeverageScoreSketcher",
-    "random_subsample": "steep.sketcher.RandomSubsampleSketcher",
-    "spatialhopper": "steep.sketcher.SpatialHopperSketcher",
+    "mog_node": "steep.sketch.MoGSketcher",
+    "geosketch": "steep.sketch.GeoSketcher",
+    "hopper": "steep.sketch.HopperSketcher",
+    "jointhopper": "steep.sketch.JointHopperSketcher",
+    "leverage_score_sampling": "steep.sketch.LeverageScoreSketcher",
+    "random_subsample": "steep.sketch.RandomSubsampleSketcher",
+    "spatialhopper": "steep.sketch.SpatialHopperSketcher",
 }
 
 
